@@ -1,9 +1,11 @@
 ﻿using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
+using DotNetEnv;
 
-var wsUrl = args.FirstOrDefault()
-            ?? Environment.GetEnvironmentVariable("GROCERY_WS_URL");
+Env.Load();
+
+var wsUrl = Environment.GetEnvironmentVariable("GROCERY_WS_URL");
 
 if (string.IsNullOrWhiteSpace(wsUrl))
 {
@@ -22,7 +24,7 @@ Console.CancelKeyPress += (_, e) =>
     cts.Cancel();
 };
 
-Console.WriteLine($"Connecting to: {wsUrl}");
+Console.WriteLine($"Connecting to websocket");
 
 try
 {
@@ -31,7 +33,7 @@ try
 catch (WebSocketException ex)
 {
     Console.WriteLine($"Connection failed: {ex.Message}");
-    Console.WriteLine("If you got 403, generate a fresh WebSocket URL/token and try again.");
+    Console.WriteLine("In case of 403 generate fresh websocket Url");
     return;
 }
 

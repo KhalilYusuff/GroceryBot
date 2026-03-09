@@ -1,6 +1,6 @@
 namespace GroceryBot;
 
-public class GroceryBotClient
+public static class GroceryBotClient
 {
     
 }
