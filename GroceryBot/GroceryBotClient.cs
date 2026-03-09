@@ -1,3 +1,5 @@
+using GroceryBot.Model;
+
 namespace GroceryBot;
 using System.Net.WebSockets;
 using System.Text;
@@ -45,7 +47,8 @@ public class GroceryBotClient
             Console.WriteLine("In case of 403 generate fresh token");
             return;
         }
-        
+
+        var state = Receive(cts.Token);
         
         Console.WriteLine("Connected. Bot is moving. Press Ctrl+C to stop.");
 
@@ -59,62 +62,50 @@ public class GroceryBotClient
         
     }
     
-    
-    
-    private static async Task Decide(CancellationToken ct, Bot bot)
+    private static async Task<BotResponse> Decide(CancellationToken ct, Bot bot, GameState state)
     {
-        var directions = new[] { "up", "right", "down", "left" };
-        var i = 0;
-        var x = bot.Position[0];
-        var y = bot.Position[1];
-        
-        while (!ct.IsCancellationRequested && _socket.State == WebSocketState.Open)
+        var xy = bot.Position;
+        var dropOff = state.Drop_off;
+
+        if (bot.Inventory.Count > 0 && xy == dropOff)
         {
-            var direction = directions[i % directions.Length];
-            i++;
-
-            var payload = JsonSerializer.Serialize(new
-            {
-                action = "move",
-                direction
-            });
-
-            await _socket.SendAsync(
-                Encoding.UTF8.GetBytes(payload),
-                WebSocketMessageType.Text,
-                true,
-                ct
-            );
-
-            Console.WriteLine($"-> {payload}");
-            await Task.Delay(450, ct);
+            var botResponse = new BotResponse();
+            var action = new Actions();
+            action.BotId = bot.Id;
+            action.Action = "dop_off";
+            return botResponse;
         }
+        
     }
+    
 
-    private static async Task Receive( CancellationToken ct)
+    private static async Task<GameState> Receive( CancellationToken ct)
     {
         var buffer = new byte[8 * 1024];
 
         while (!ct.IsCancellationRequested && _socket.State == WebSocketState.Open)
         {
-            using var ms = new MemoryStream();
             WebSocketReceiveResult result;
-
+            GameState? mappedResult;
             do
             {
                 result = await _socket.ReceiveAsync(buffer, ct);
-
                 if (result.MessageType == WebSocketMessageType.Close)
                 {
                     Console.WriteLine($"Server closed: {result.CloseStatus} {result.CloseStatusDescription}");
-                    return;
+                    return new GameState();
                 }
 
-                ms.Write(buffer, 0, result.Count);
+                var json = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                mappedResult = JsonSerializer.Deserialize<GameState>(json);
+                
+                Console.WriteLine($"Round: {mappedResult?.Round}");
+
             } while (!result.EndOfMessage);
 
-            var text = Encoding.UTF8.GetString(ms.ToArray());
-            Console.WriteLine($"<- {text}");
+            return mappedResult;
         }
+
+        return new GameState();
     }
 }
