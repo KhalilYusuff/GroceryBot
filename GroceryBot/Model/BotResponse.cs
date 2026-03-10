@@ -23,6 +23,7 @@ public class Actions
     public string Action { get; set; } = string.Empty;
 
     [JsonPropertyName("item_id")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? ItemId { get; set; }
 
     public override string ToString()

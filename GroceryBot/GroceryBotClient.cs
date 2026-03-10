@@ -49,9 +49,10 @@ public class GroceryBotClient
         
         Console.WriteLine("Connected. Bot is moving. Press Ctrl+C to stop.");
         
-        while (_socket.State == WebSocketState.Open)
+        while (true)
         {
             var state = await Receive(cts.Token);
+            
             Console.WriteLine($"received: {state}");
 
             if (state.Type == "game_over")
@@ -65,7 +66,7 @@ public class GroceryBotClient
                 Console.WriteLine("Bots is empty or null");
                 break;
             }
-
+            
             var decision = new BotResponse
             {
                 Actions = state.Bots
@@ -75,6 +76,7 @@ public class GroceryBotClient
             Console.WriteLine($"decision: {decision}");
             
             var payload = JsonSerializer.Serialize(decision, JsonOptions);
+            //Console.WriteLine($"payload: {payload}");
 
             await _socket.SendAsync(
                 Encoding.UTF8.GetBytes(payload),
@@ -83,7 +85,6 @@ public class GroceryBotClient
                 cts.Token
             );
         }
-
     }
 
     private static BotResponse MoveToward(int botId, int x, int y, int[] target)
@@ -107,7 +108,6 @@ public class GroceryBotClient
             {
                 return CreateResponse(botId, "move_down");
             }
-
             return CreateResponse(botId, "move_up");
         }
 
@@ -142,7 +142,7 @@ public class GroceryBotClient
         {
             needed.Remove(delivered);
         }
-
+        
         foreach (var item in state.Items)
         {
             if (needed.Contains(item.Type))
@@ -152,6 +152,7 @@ public class GroceryBotClient
 
                 if (Math.Abs(ix - x) + Math.Abs(iy - y) == 1)
                 {
+                    Console.WriteLine($"Picking up: {item.Type} id: {item.Id}");
                     return CreateResponse(bot.Id, "pick_up", item.Id);
                 }
             }
@@ -161,12 +162,15 @@ public class GroceryBotClient
         {
             if (needed.Contains(item.Type))
             {
-                return MoveToward(bot.Id, x, y, item.Position);
+                Console.WriteLine($"moving towards: {item}");
+                Console.WriteLine($"{}");
+                var response =  MoveToward(bot.Id, x, y, item.Position);
             }
         }
 
         if (bot.Inventory.Count > 0)
         {
+            Console.WriteLine($"moving towards: {dropOff}");
             return MoveToward(bot.Id, x, y, dropOff);
         }
 
