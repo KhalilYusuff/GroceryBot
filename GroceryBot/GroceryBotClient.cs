@@ -362,6 +362,18 @@ public class GroceryBotClient
         PlanningContext planningContext,
         List<int[]> deliveryTargets)
     {
+        if (task.Kind != "deliver" &&
+            bot.Position.Length >= 2 &&
+            planningContext.ReservedCorridorCells.Contains((bot.Position[0], bot.Position[1])))
+        {
+            var corridorEscape = FindCorridorEscapeAction(bot, state, planningContext);
+            if (corridorEscape is { } escape)
+            {
+                LogMoveDiagnostics(bot, state, escape.Target, escape.Action, $"{task.Kind}:escape");
+                return CreateResponse(bot.Id, escape.Action);
+            }
+        }
+
         return task.Kind switch
         {
             "deliver" => ExecuteDeliverTask(bot, state, planningContext, task.Target ?? GetBestTarget(bot.Position, deliveryTargets, state), task.Kind),
@@ -1097,6 +1109,48 @@ public class GroceryBotClient
         }
 
         return FindBestImmediateStep(bot.Position, preferredTarget, state, occupiedPositions, [], false) ?? "wait";
+    }
+
+    private static (string Action, int[] Target)? FindCorridorEscapeAction(
+        Bot bot,
+        GameState state,
+        PlanningContext planningContext)
+    {
+        if (bot.Position.Length < 2)
+        {
+            return null;
+        }
+
+        var current = (X: bot.Position[0], Y: bot.Position[1]);
+        var deliveryTargets = GetDeliveryTargets(state);
+        var currentDeliveryDistance = deliveryTargets.Count == 0
+            ? int.MaxValue
+            : deliveryTargets.Min(target => Math.Abs(current.X - target[0]) + Math.Abs(current.Y - target[1]));
+
+        var candidate = GetNeighbors(current)
+            .Where(neighbor => IsWalkable([neighbor.X, neighbor.Y], state, planningContext.OccupiedPositions))
+            .Where(neighbor => !planningContext.ReservedCorridorCells.Contains(neighbor))
+            .OrderByDescending(neighbor => deliveryTargets.Count == 0
+                ? 0
+                : deliveryTargets.Min(target => Math.Abs(neighbor.X - target[0]) + Math.Abs(neighbor.Y - target[1])))
+            .ThenBy(neighbor => Math.Abs(neighbor.X - current.X) + Math.Abs(neighbor.Y - current.Y))
+            .FirstOrDefault();
+
+        if (candidate == default)
+        {
+            return null;
+        }
+
+        var candidateDeliveryDistance = deliveryTargets.Count == 0
+            ? int.MaxValue
+            : deliveryTargets.Min(target => Math.Abs(candidate.X - target[0]) + Math.Abs(candidate.Y - target[1]));
+
+        if (candidateDeliveryDistance < currentDeliveryDistance)
+        {
+            return null;
+        }
+
+        return (ToAction(current, candidate), [candidate.X, candidate.Y]);
     }
 
     private static int[]? GetPickupAccessTarget(
