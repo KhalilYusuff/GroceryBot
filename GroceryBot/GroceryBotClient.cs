@@ -14,6 +14,8 @@ public class GroceryBotClient
     private static readonly ClientWebSocket _socket = new();
     private static readonly Dictionary<int, (int X, int Y)> LastPositions = new();
     private static readonly Dictionary<int, int> StuckRounds = new();
+    private static readonly Dictionary<int, Queue<(int X, int Y)>> CourierRoutes = new();
+    private static readonly Dictionary<int, (string ItemId, int X, int Y)> PickupAccessTargets = new();
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNameCaseInsensitive = true
@@ -379,10 +381,15 @@ public class GroceryBotClient
     {
         if (IsAtAnyTarget(bot.Position, GetDeliveryTargets(state)))
         {
+            CourierRoutes.Remove(bot.Id);
             return CreateResponse(bot.Id, "drop_off");
         }
 
-        return ExecuteMoveTask(bot, state, planningContext, deliveryTarget, true, role);
+        var response = ExecuteDeliverMoveTask(bot, state, planningContext, deliveryTarget, role);
+        var action = response.Actions[0].Action;
+        var nextPosition = GetNextPosition(bot.Position, action);
+        AdvanceCourierRoute(bot.Id, nextPosition);
+        return response;
     }
 
     private static BotResponse ExecutePickupTask(
@@ -407,19 +414,16 @@ public class GroceryBotClient
             var distance = Math.Abs(bot.Position[0] - item.Position[0]) + Math.Abs(bot.Position[1] - item.Position[1]);
             if (distance == 1)
             {
+                PickupAccessTargets.Remove(bot.Id);
                 return CreateResponse(bot.Id, "pick_up", item.Id);
             }
         }
 
-        var target = FindAdjacentWalkableTarget(
-            item.Position,
-            state,
-            planningContext.OccupiedPositions,
-            planningContext.ReservedTargets,
-            bot.Position);
+        var target = GetPickupAccessTarget(bot, item, state, planningContext);
 
         if (target == null)
         {
+            PickupAccessTargets.Remove(bot.Id);
             return CreateResponse(bot.Id, FindRecoveryAction(bot, state, planningContext.OccupiedPositions, []));
         }
 
@@ -431,6 +435,36 @@ public class GroceryBotClient
         }
 
         return ExecuteMoveTask(bot, state, planningContext, target, false, task.Kind);
+    }
+
+    private static BotResponse ExecuteDeliverMoveTask(
+        Bot bot,
+        GameState state,
+        PlanningContext planningContext,
+        int[] deliveryTarget,
+        string role)
+    {
+        var route = GetCourierRoute(bot, deliveryTarget, state);
+        var preferredNode = GetNextCourierNode(bot, route);
+        if (preferredNode != null)
+        {
+            var preferredTarget = new[] { preferredNode.Value.X, preferredNode.Value.Y };
+            var preferredAction = ToAction((bot.Position[0], bot.Position[1]), preferredNode.Value);
+            if (preferredAction != "wait" &&
+                IsWalkable(preferredTarget, state, planningContext.OccupiedPositions))
+            {
+                LogMoveDiagnostics(bot, state, preferredTarget, preferredAction, $"{role}:route");
+                return CreateResponse(bot.Id, preferredAction);
+            }
+        }
+
+        var response = ExecuteMoveTask(bot, state, planningContext, deliveryTarget, true, role);
+        if (response.Actions[0].Action == "wait")
+        {
+            CourierRoutes.Remove(bot.Id);
+        }
+
+        return response;
     }
 
     private static BotResponse ExecuteMoveTask(
@@ -944,6 +978,17 @@ public class GroceryBotClient
 
     private static void UpdateProgressTracking(GameState state)
     {
+        var activeBotIds = state.Bots.Select(bot => bot.Id).ToHashSet();
+        foreach (var botId in CourierRoutes.Keys.Where(botId => !activeBotIds.Contains(botId)).ToList())
+        {
+            CourierRoutes.Remove(botId);
+        }
+
+        foreach (var botId in PickupAccessTargets.Keys.Where(botId => !activeBotIds.Contains(botId)).ToList())
+        {
+            PickupAccessTargets.Remove(botId);
+        }
+
         foreach (var bot in state.Bots.Where(bot => bot.Position.Length >= 2))
         {
             var currentPosition = (bot.Position[0], bot.Position[1]);
@@ -978,6 +1023,7 @@ public class GroceryBotClient
 
         if (action.Action == "pick_up" && !string.IsNullOrEmpty(action.ItemId))
         {
+            PickupAccessTargets.Remove(bot.Id);
             if (!planningContext.ReservedItemIds.Add(action.ItemId))
             {
                 return;
@@ -1009,6 +1055,11 @@ public class GroceryBotClient
             {
                 planningContext.ReservedTargets.Add((nextPosition[0], nextPosition[1]));
             }
+        }
+
+        if (action.Action == "drop_off")
+        {
+            CourierRoutes.Remove(bot.Id);
         }
     }
 
@@ -1048,6 +1099,136 @@ public class GroceryBotClient
         return FindBestImmediateStep(bot.Position, preferredTarget, state, occupiedPositions, [], false) ?? "wait";
     }
 
+    private static int[]? GetPickupAccessTarget(
+        Bot bot,
+        Item item,
+        GameState state,
+        PlanningContext planningContext)
+    {
+        if (PickupAccessTargets.TryGetValue(bot.Id, out var accessTarget) &&
+            accessTarget.ItemId == item.Id)
+        {
+            var cachedTarget = new[] { accessTarget.X, accessTarget.Y };
+            if (IsAccessiblePickupTarget(bot, cachedTarget, state, planningContext))
+            {
+                return cachedTarget;
+            }
+        }
+
+        var selected = GetAdjacentTargets(item.Position)
+            .Where(candidate => IsAccessiblePickupTarget(bot, candidate, state, planningContext))
+            .OrderBy(candidate => GetPathDistance(bot.Position, candidate, state))
+            .ThenBy(candidate => Math.Abs(candidate[0] - bot.Position[0]) + Math.Abs(candidate[1] - bot.Position[1]))
+            .FirstOrDefault();
+
+        if (selected == null)
+        {
+            PickupAccessTargets.Remove(bot.Id);
+            return null;
+        }
+
+        PickupAccessTargets[bot.Id] = (item.Id, selected[0], selected[1]);
+        return selected;
+    }
+
+    private static bool IsAccessiblePickupTarget(
+        Bot bot,
+        int[] target,
+        GameState state,
+        PlanningContext planningContext)
+    {
+        if (target.Length < 2)
+        {
+            return false;
+        }
+
+        if (bot.Position.Length >= 2 && bot.Position[0] == target[0] && bot.Position[1] == target[1])
+        {
+            return true;
+        }
+
+        if (planningContext.ReservedTargets.Contains((target[0], target[1])))
+        {
+            return false;
+        }
+
+        return IsWalkable(target, state, planningContext.OccupiedPositions);
+    }
+
+    private static IEnumerable<int[]> GetAdjacentTargets(int[] itemPosition)
+    {
+        if (itemPosition.Length < 2)
+        {
+            return [];
+        }
+
+        return
+        [
+            [itemPosition[0], itemPosition[1] - 1],
+            [itemPosition[0] + 1, itemPosition[1]],
+            [itemPosition[0], itemPosition[1] + 1],
+            [itemPosition[0] - 1, itemPosition[1]]
+        ];
+    }
+
+    private static Queue<(int X, int Y)> GetCourierRoute(Bot bot, int[] deliveryTarget, GameState state)
+    {
+        if (CourierRoutes.TryGetValue(bot.Id, out var existingRoute))
+        {
+            var nextNode = existingRoute.Count > 0 ? existingRoute.Peek() : ((int X, int Y)?)null;
+            if (nextNode != null &&
+                (bot.Position[0] == nextNode.Value.X && bot.Position[1] == nextNode.Value.Y))
+            {
+                existingRoute.Dequeue();
+            }
+
+            if (existingRoute.Count > 0)
+            {
+                return existingRoute;
+            }
+        }
+
+        var route = new Queue<(int X, int Y)>(GetPathNodes(bot.Position, deliveryTarget, state).Skip(1));
+        CourierRoutes[bot.Id] = route;
+        return route;
+    }
+
+    private static (int X, int Y)? GetNextCourierNode(Bot bot, Queue<(int X, int Y)> route)
+    {
+        while (route.Count > 0)
+        {
+            var next = route.Peek();
+            if (bot.Position[0] == next.X && bot.Position[1] == next.Y)
+            {
+                route.Dequeue();
+                continue;
+            }
+
+            return next;
+        }
+
+        return null;
+    }
+
+    private static void AdvanceCourierRoute(int botId, int[] nextPosition)
+    {
+        if (nextPosition.Length < 2 || !CourierRoutes.TryGetValue(botId, out var route) || route.Count == 0)
+        {
+            return;
+        }
+
+        var nextNode = route.Peek();
+        if (nextNode.X == nextPosition[0] && nextNode.Y == nextPosition[1])
+        {
+            route.Dequeue();
+        }
+
+        if (route.Count == 0)
+        {
+            CourierRoutes.Remove(botId);
+        }
+    }
+
     private static string? FindBestImmediateStep(
         int[] start,
         int[] target,
@@ -1067,10 +1248,21 @@ public class GroceryBotClient
         }
 
         var startNode = (X: start[0], Y: start[1]);
+        var currentDistance = GetPathDistance(start, target, state);
 
         return GetNeighbors(startNode)
             .Where(neighbor => IsWalkable([neighbor.X, neighbor.Y], state, occupiedPositions))
             .Where(neighbor => prioritizeCourier || !reservedCorridorCells.Contains(neighbor))
+            .Where(neighbor =>
+            {
+                if (!prioritizeCourier)
+                {
+                    return true;
+                }
+
+                var candidateDistance = GetPathDistance([neighbor.X, neighbor.Y], target, state);
+                return candidateDistance <= currentDistance;
+            })
             .OrderBy(neighbor => GetPathDistance([neighbor.X, neighbor.Y], target, state))
             .ThenBy(neighbor => Math.Abs(neighbor.X - target[0]) + Math.Abs(neighbor.Y - target[1]))
             .Select(neighbor => ToAction(startNode, neighbor))
