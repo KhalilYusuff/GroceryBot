@@ -1,8 +1,11 @@
 namespace GroceryBot.Model;
 
+using System.Text.Json.Serialization;
+
 public class BotResponse
 {
-    public Actions[] Actions { get; set; }
+    [JsonPropertyName("actions")]
+    public Actions[] Actions { get; set; } = [];
 
     public override string ToString()
     {
@@ -13,9 +16,14 @@ public class BotResponse
 
 public class Actions
 {
+    [JsonPropertyName("bot_id")]
     public int BotId { get; set; }
-    public string Action { get; set; }
-    public string ItemId { get; set; }
+
+    [JsonPropertyName("action")]
+    public string Action { get; set; } = string.Empty;
+
+    [JsonPropertyName("item_id")]
+    public string? ItemId { get; set; }
 
     public override string ToString()
     {

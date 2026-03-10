@@ -1,17 +1,26 @@
+using System.Text.Json.Serialization;
 using System.Collections.Generic;
 using System.Linq;
 
 public class GameState
 {
-    public string Type { get; set; }
+    public string Type { get; set; } = string.Empty;
     public int Round { get; set; }
+
+    [JsonPropertyName("max_rounds")]
     public int Max_rounds { get; set; }
-    public Grid Grid { get; set; }
-    public List<Bot> Bots { get; set; }
-    public List<Item> Items { get; set; }
-    public List<Order> Orders { get; set; }
-    public int[] Drop_off { get; set; }
-    public List<int[]> Drop_off_zones { get; set; }
+
+    public Grid Grid { get; set; } = new();
+    public List<Bot> Bots { get; set; } = [];
+    public List<Item> Items { get; set; } = [];
+    public List<Order> Orders { get; set; } = [];
+
+    [JsonPropertyName("drop_off")]
+    public int[] Drop_off { get; set; } = [];
+
+    [JsonPropertyName("drop_off_zones")]
+    public List<int[]> Drop_off_zones { get; set; } = [];
+
     public int Score { get; set; }
 
     public override string ToString()
@@ -41,7 +50,7 @@ public class Grid
 {
     public int Width { get; set; }
     public int Height { get; set; }
-    public List<int[]> Walls { get; set; }
+    public List<int[]> Walls { get; set; } = [];
 
     public override string ToString()
     {
@@ -53,8 +62,8 @@ public class Grid
 public class Bot
 {
     public int Id { get; set; }
-    public int[] Position { get; set; }
-    public List<string> Inventory { get; set; }
+    public int[] Position { get; set; } = [];
+    public List<string> Inventory { get; set; } = [];
 
     public override string ToString()
     {
@@ -66,9 +75,9 @@ public class Bot
 
 public class Item
 {
-    public string Id { get; set; }
-    public string Type { get; set; }
-    public int[] Position { get; set; }
+    public string Id { get; set; } = string.Empty;
+    public string Type { get; set; } = string.Empty;
+    public int[] Position { get; set; } = [];
 
     public override string ToString()
     {
@@ -79,11 +88,16 @@ public class Item
 
 public class Order
 {
-    public string Id { get; set; }
-    public List<string> Items_required { get; set; }
-    public List<string> Items_delivered { get; set; }
+    public string Id { get; set; } = string.Empty;
+
+    [JsonPropertyName("items_required")]
+    public List<string> Items_required { get; set; } = [];
+
+    [JsonPropertyName("items_delivered")]
+    public List<string> Items_delivered { get; set; } = [];
+
     public bool Complete { get; set; }
-    public string Status { get; set; }
+    public string Status { get; set; } = string.Empty;
 
     public override string ToString()
     {
