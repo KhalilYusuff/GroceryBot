@@ -11,6 +11,10 @@ public class GroceryBotClient
 {
     private static string? _wsUrl; 
     private static readonly ClientWebSocket _socket = new();
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true
+    };
 
     public static async Task Play()
     {
@@ -62,8 +66,15 @@ public class GroceryBotClient
                 break;
             }
 
-            var decision = Decide(state.Bots[0], state);
-            var payload = JsonSerializer.Serialize(decision);
+            var decision = new BotResponse
+            {
+                Actions = state.Bots
+                    .Select(bot => Decide(bot, state).Actions[0])
+                    .ToArray()
+            };
+            Console.WriteLine($"decision: {decision}");
+            
+            var payload = JsonSerializer.Serialize(decision, JsonOptions);
 
             await _socket.SendAsync(
                 Encoding.UTF8.GetBytes(payload),
@@ -184,7 +195,7 @@ public class GroceryBotClient
 
             } while (!result.EndOfMessage);
 
-            var mappedResult = JsonSerializer.Deserialize<GameState>(payload.ToString());
+            var mappedResult = JsonSerializer.Deserialize<GameState>(payload.ToString(), JsonOptions);
             if (mappedResult != null)
             {
                 Console.WriteLine($"Round: {mappedResult.Round}");

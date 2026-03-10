@@ -16,7 +16,7 @@ public class BotResponse
 
 public class Actions
 {
-    [JsonPropertyName("bot_id")]
+    [JsonPropertyName("bot")]
     public int BotId { get; set; }
 
     [JsonPropertyName("action")]
