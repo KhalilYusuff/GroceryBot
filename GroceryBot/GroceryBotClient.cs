@@ -1,5 +1,6 @@
 using GroceryBot.Model;
 using System.Linq;
+using System.Collections.Generic;
 
 namespace GroceryBot;
 using System.Net.WebSockets;
@@ -69,9 +70,7 @@ public class GroceryBotClient
             
             var decision = new BotResponse
             {
-                Actions = state.Bots
-                    .Select(bot => Decide(bot, state).Actions[0])
-                    .ToArray()
+                Actions = BuildActions(state)
             };
             Console.WriteLine($"decision: {decision}");
             
@@ -87,60 +86,86 @@ public class GroceryBotClient
         }
     }
 
-    private static BotResponse MoveToward(int botId, int x, int y, int[] target)
+    private static BotResponse MoveToward(Bot bot, GameState state, int[] target, HashSet<(int X, int Y)> occupiedPositions)
     {
-        var targetX = target[0];
-        var targetY = target[1];
+        var nextAction = FindPathAction(bot.Position, target, state, occupiedPositions);
+        return CreateResponse(bot.Id, nextAction);
+    }
 
-        if (Math.Abs(targetX - x) > Math.Abs(targetY - y))
+    private static Actions[] BuildActions(GameState state)
+    {
+        var occupiedPositions = state.Bots
+            .Where(bot => bot.Position.Length >= 2)
+            .Select(bot => (bot.Position[0], bot.Position[1]))
+            .ToHashSet();
+
+        var actions = new List<Actions>(state.Bots.Count);
+
+        foreach (var bot in state.Bots.OrderBy(bot => bot.Id))
         {
-            if (targetX > x)
+            occupiedPositions.Remove((bot.Position[0], bot.Position[1]));
+
+            var response = Decide(bot, state, occupiedPositions);
+            var action = response.Actions[0];
+            var nextPosition = GetNextPosition(bot.Position, action.Action);
+
+            if (action.Action != "wait" && nextPosition.Length >= 2)
             {
-                return CreateResponse(botId, "move_right");
+                occupiedPositions.Add((nextPosition[0], nextPosition[1]));
             }
 
-            return CreateResponse(botId, "move_left");
+            actions.Add(action);
         }
 
-        if (targetY != y)
-        {
-            if (targetY > y)
-            {
-                return CreateResponse(botId, "move_down");
-            }
-            return CreateResponse(botId, "move_up");
-        }
-
-        return CreateResponse(botId, "wait");
+        return actions.ToArray();
     }
     
-    private static BotResponse Decide(Bot bot, GameState state)
+    private static BotResponse Decide(Bot bot, GameState state, HashSet<(int X, int Y)> occupiedPositions)
     {
         var x = bot.Position[0];
         var y = bot.Position[1];
         var dropOff = state.Drop_off;
-
-        if (bot.Inventory.Count > 0 && bot.Position.SequenceEqual(dropOff))
-        {
-            return CreateResponse(bot.Id, "drop_off");
-        }
-        
-        if (bot.Inventory.Count >= 3)
-        {
-            return MoveToward(bot.Id, x, y, dropOff);
-        }
-        
         var active = state.Orders.FirstOrDefault(o => o.Status == "active");
+
         if (active == null)
         {
             return CreateResponse(bot.Id, "wait");
         }
 
-        var needed = new List<string>(active.Items_required);
+        var outstandingNeeded = new List<string>(active.Items_required);
 
         foreach (var delivered in active.Items_delivered)
         {
-            needed.Remove(delivered);
+            outstandingNeeded.Remove(delivered);
+        }
+
+        var needed = new List<string>(outstandingNeeded);
+        foreach (var carried in bot.Inventory)
+        {
+            needed.Remove(carried);
+        }
+
+        var deliverableRemaining = new List<string>(outstandingNeeded);
+        var hasDeliverableItem = false;
+        foreach (var carried in bot.Inventory)
+        {
+            if (!deliverableRemaining.Contains(carried))
+            {
+                continue;
+            }
+
+            deliverableRemaining.Remove(carried);
+            hasDeliverableItem = true;
+        }
+
+        if (hasDeliverableItem && bot.Position.SequenceEqual(dropOff))
+        {
+            return CreateResponse(bot.Id, "drop_off");
+        }
+
+        if (bot.Inventory.Count >= 3)
+        {
+            return MoveToward(bot, state, dropOff, occupiedPositions);
         }
         
         foreach (var item in state.Items)
@@ -158,20 +183,30 @@ public class GroceryBotClient
             }
         }
         
-        foreach (var item in state.Items)
-        {
-            if (needed.Contains(item.Type))
+        var candidateItems = state.Items
+            .Where(item => needed.Contains(item.Type))
+            .Select(item => new
             {
-                Console.WriteLine($"moving towards: {item}");
-                Console.WriteLine($"{}");
-                var response =  MoveToward(bot.Id, x, y, item.Position);
-            }
+                Item = item,
+                Target = FindAdjacentWalkableTarget(item.Position, state, occupiedPositions, bot.Position)
+            })
+            .Where(candidate => candidate.Target != null)
+            .OrderBy(candidate => GetPathDistance(bot.Position, candidate.Target!, state, occupiedPositions))
+            .ToList();
+
+        foreach (var candidate in candidateItems)
+        {
+            var response = MoveToward(bot, state, candidate.Target!, occupiedPositions);
+            LogMoveDiagnostics(bot, state, candidate.Target!, response.Actions[0].Action);
+            return response;
         }
 
         if (bot.Inventory.Count > 0)
         {
             Console.WriteLine($"moving towards: {dropOff}");
-            return MoveToward(bot.Id, x, y, dropOff);
+            var response = MoveToward(bot, state, dropOff, occupiedPositions);
+            LogMoveDiagnostics(bot, state, dropOff, response.Actions[0].Action);
+            return response;
         }
 
         return CreateResponse(bot.Id, "wait");
@@ -224,5 +259,255 @@ public class GroceryBotClient
                 }
             ]
         };
+    }
+
+    private static void LogMoveDiagnostics(Bot bot, GameState state, int[] target, string action)
+    {
+        var next = GetNextPosition(bot.Position, action);
+        var isWall = state.Grid.Walls.Any(w => w.Length >= 2 && w[0] == next[0] && w[1] == next[1]);
+        var isShelf = state.Items.Any(item => item.Position.Length >= 2 && item.Position[0] == next[0] && item.Position[1] == next[1]);
+        var blockingBot = state.Bots.FirstOrDefault(other =>
+            other.Id != bot.Id &&
+            other.Position.Length >= 2 &&
+            other.Position[0] == next[0] &&
+            other.Position[1] == next[1]);
+
+        Console.WriteLine(
+            $"diag: bot={bot.Id} current={FormatPoint(bot.Position)} target={FormatPoint(target)} " +
+            $"action={action} next={FormatPoint(next)} wall={isWall} shelf={isShelf} " +
+            $"blocked_by_bot={(blockingBot == null ? "none" : blockingBot.Id)}");
+    }
+
+    private static int[] GetNextPosition(int[] current, string action)
+    {
+        if (current.Length < 2)
+        {
+            return [];
+        }
+
+        return action switch
+        {
+            "move_up" => [current[0], current[1] - 1],
+            "move_down" => [current[0], current[1] + 1],
+            "move_left" => [current[0] - 1, current[1]],
+            "move_right" => [current[0] + 1, current[1]],
+            _ => [current[0], current[1]]
+        };
+    }
+
+    private static string FormatPoint(int[] point)
+    {
+        return point.Length >= 2 ? $"[{point[0]}, {point[1]}]" : "[]";
+    }
+
+    private static int[]? FindAdjacentWalkableTarget(
+        int[] itemPosition,
+        GameState state,
+        HashSet<(int X, int Y)> occupiedPositions,
+        int[] botPosition)
+    {
+        if (itemPosition.Length < 2)
+        {
+            return null;
+        }
+
+        var candidates = new[]
+        {
+            new[] { itemPosition[0], itemPosition[1] - 1 },
+            new[] { itemPosition[0], itemPosition[1] + 1 },
+            new[] { itemPosition[0] - 1, itemPosition[1] },
+            new[] { itemPosition[0] + 1, itemPosition[1] }
+        };
+
+        return candidates
+            .Where(candidate => IsWalkable(candidate, state, occupiedPositions))
+            .OrderBy(candidate => GetPathDistance(botPosition, candidate, state, occupiedPositions))
+            .FirstOrDefault();
+    }
+
+    private static bool IsWalkable(int[] position, GameState state, HashSet<(int X, int Y)> occupiedPositions)
+    {
+        if (position.Length < 2)
+        {
+            return false;
+        }
+
+        var x = position[0];
+        var y = position[1];
+
+        if (x < 0 || x >= state.Grid.Width || y < 0 || y >= state.Grid.Height)
+        {
+            return false;
+        }
+
+        if (state.Grid.Walls.Any(w => w.Length >= 2 && w[0] == x && w[1] == y))
+        {
+            return false;
+        }
+
+        if (state.Items.Any(item => item.Position.Length >= 2 && item.Position[0] == x && item.Position[1] == y))
+        {
+            return false;
+        }
+
+        if (occupiedPositions.Contains((x, y)))
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    private static string FindPathAction(
+        int[] start,
+        int[] target,
+        GameState state,
+        HashSet<(int X, int Y)> occupiedPositions)
+    {
+        if (start.Length < 2 || target.Length < 2)
+        {
+            return "wait";
+        }
+
+        if (start[0] == target[0] && start[1] == target[1])
+        {
+            return "wait";
+        }
+
+        var startNode = (X: start[0], Y: start[1]);
+        var targetNode = (X: target[0], Y: target[1]);
+        var queue = new Queue<(int X, int Y)>();
+        var visited = new HashSet<(int X, int Y)> { startNode };
+        var previous = new Dictionary<(int X, int Y), (int X, int Y)>();
+
+        queue.Enqueue(startNode);
+
+        while (queue.Count > 0)
+        {
+            var current = queue.Dequeue();
+            if (current == targetNode)
+            {
+                break;
+            }
+
+            foreach (var neighbor in GetNeighbors(current))
+            {
+                if (visited.Contains(neighbor) || !IsWalkableStep(neighbor, targetNode, state, occupiedPositions))
+                {
+                    continue;
+                }
+
+                visited.Add(neighbor);
+                previous[neighbor] = current;
+                queue.Enqueue(neighbor);
+            }
+        }
+
+        if (!visited.Contains(targetNode))
+        {
+            return "wait";
+        }
+
+        var step = targetNode;
+        while (previous.TryGetValue(step, out var parent) && parent != startNode)
+        {
+            step = parent;
+        }
+
+        return ToAction(startNode, step);
+    }
+
+    private static int GetPathDistance(
+        int[] start,
+        int[] target,
+        GameState state,
+        HashSet<(int X, int Y)> occupiedPositions)
+    {
+        if (start.Length < 2 || target.Length < 2)
+        {
+            return int.MaxValue;
+        }
+
+        var startNode = (X: start[0], Y: start[1]);
+        var targetNode = (X: target[0], Y: target[1]);
+        var queue = new Queue<((int X, int Y) Node, int Distance)>();
+        var visited = new HashSet<(int X, int Y)> { startNode };
+
+        queue.Enqueue((startNode, 0));
+
+        while (queue.Count > 0)
+        {
+            var (current, distance) = queue.Dequeue();
+            if (current == targetNode)
+            {
+                return distance;
+            }
+
+            foreach (var neighbor in GetNeighbors(current))
+            {
+                if (visited.Contains(neighbor) || !IsWalkableStep(neighbor, targetNode, state, occupiedPositions))
+                {
+                    continue;
+                }
+
+                visited.Add(neighbor);
+                queue.Enqueue((neighbor, distance + 1));
+            }
+        }
+
+        return int.MaxValue;
+    }
+
+    private static IEnumerable<(int X, int Y)> GetNeighbors((int X, int Y) point)
+    {
+        yield return (point.X, point.Y - 1);
+        yield return (point.X + 1, point.Y);
+        yield return (point.X, point.Y + 1);
+        yield return (point.X - 1, point.Y);
+    }
+
+    private static bool IsWalkableStep(
+        (int X, int Y) position,
+        (int X, int Y) target,
+        GameState state,
+        HashSet<(int X, int Y)> occupiedPositions)
+    {
+        if (position.X == target.X && position.Y == target.Y)
+        {
+            return position.X >= 0 &&
+                   position.X < state.Grid.Width &&
+                   position.Y >= 0 &&
+                   position.Y < state.Grid.Height &&
+                   !state.Grid.Walls.Any(w => w.Length >= 2 && w[0] == position.X && w[1] == position.Y) &&
+                   !state.Items.Any(item => item.Position.Length >= 2 && item.Position[0] == position.X && item.Position[1] == position.Y) &&
+                   !occupiedPositions.Contains(position);
+        }
+
+        return IsWalkable([position.X, position.Y], state, occupiedPositions);
+    }
+
+    private static string ToAction((int X, int Y) start, (int X, int Y) next)
+    {
+        if (next.X == start.X && next.Y == start.Y - 1)
+        {
+            return "move_up";
+        }
+
+        if (next.X == start.X + 1 && next.Y == start.Y)
+        {
+            return "move_right";
+        }
+
+        if (next.X == start.X && next.Y == start.Y + 1)
+        {
+            return "move_down";
+        }
+
+        if (next.X == start.X - 1 && next.Y == start.Y)
+        {
+            return "move_left";
+        }
+
+        return "wait";
     }
 }
