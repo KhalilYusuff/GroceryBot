@@ -51,33 +51,144 @@ public class GroceryBotClient
         var state = Receive(cts.Token);
         
         Console.WriteLine("Connected. Bot is moving. Press Ctrl+C to stop.");
+        
+        while (true)
+        {
+            var receiveTask = Task.Run(() => Receive(cts.Token), cts.Token);
+            Console.WriteLine($"recieved: {receiveTask.Result.ToString()}");
+            Decide(receiveTask.Result.Bots[0], receiveTask.Result);
+            
+        }
 
-        /*var receiveTask = Task.Run(() => Receive(cts.Token), cts.Token);
-        await Decide(cts.Token);
-        await receiveTask; */
     }
 
-    private static async Task MoveToward(string botId, int x, int y, List<int> target)
+    private static BotResponse MoveToward(int botId, int x, int y, int[] target)
     {
-        
+        var targetX = target[0];
+        var targetY = target[1];
+        var botResponse = new BotResponse();
+        var action = new Actions();
+
+        if (Math.Abs(targetX - x) > Math.Abs(targetY - y))
+        {
+            if (targetX > x)
+            {
+                action.Action = "move_right";
+                action.BotId = botId;
+                botResponse.Actions[0] = action;
+                
+            }
+            else
+            {
+                action.Action = "move_left";
+                botResponse.Actions[0] = action;
+                
+            }
+            return botResponse;
+        }
+        if (targetY != y)
+        {
+            
+            if (targetY > y)
+            {
+                action.Action = "move_down";
+                action.BotId = botId;
+
+                botResponse.Actions[0] = action;
+            }
+
+            else
+            {
+                action.Action = "move_up";
+                action.BotId = botId;
+                botResponse.Actions[0] = action;
+            }
+
+            return botResponse;
+        }
+        action.Action = "wait";
+        action.BotId = botId;
+        botResponse.Actions[0] = action;
+        return botResponse;
     }
     
-    private static async Task<BotResponse> Decide(CancellationToken ct, Bot bot, GameState state)
+    private static BotResponse Decide(Bot bot, GameState state)
     {
-        var xy = bot.Position;
+        var x = bot.Position[0];
+        var y = bot.Position[1];
         var dropOff = state.Drop_off;
+        var botResponse = new BotResponse();
+        var action = new Actions();
 
-        if (bot.Inventory.Count > 0 && xy == dropOff)
+        //if at a dropOff cord and inventory is not empty, drop off the items in inventory
+        if (bot.Inventory.Count > 0 && bot.Position == dropOff)
         {
-            var botResponse = new BotResponse();
-            var action = new Actions();
-            action.BotId = bot.Id;
             action.Action = "dop_off";
+            botResponse.Actions[0].BotId = bot.Id;
+            botResponse.Actions[0] = action;
             return botResponse;
         }
         
+        if (bot.Inventory.Count >= 3)
+        {
+            return MoveToward(bot.Id, x, y, dropOff);
+        }
+        
+        var active = state.Orders.FirstOrDefault(o => o.Status == "active");
+        if (active == null)
+        {
+            action.Action = "wait";
+            botResponse.Actions[0] = action;
+            return botResponse;
+        }
+
+        var needed = new List<string>(active.Items_delivered);
+
+        foreach (var delivered in active.Items_delivered)
+        {
+            if (needed.Contains(delivered))
+            {
+                needed.Remove(delivered);
+            }
+        }
+
+        foreach (var item in state.Items)
+        {
+            if (needed.Contains(item.Type))
+            {
+                var ix = item.Position[0];
+                var iy = item.Position[1];
+
+                if (Math.Abs(ix - x) + Math.Abs(iy - y) == 1)
+                {
+                    action.BotId = bot.Id;
+                    action.Action = "pick_up";
+                    action.ItemId = item.Id;
+                    botResponse.Actions[0] = action;
+
+                    return botResponse;
+                }
+            }
+        }
+        
+        foreach (var item in state.Items)
+        {
+            if (needed.Contains(item.Type))
+            {
+                return MoveToward(bot.Id, x, y, item.Position);
+            }
+        }
+
+        if (bot.Inventory.Count > 0)
+        {
+            return MoveToward(bot.Id, x, y, dropOff);
+        }
+
+        action.BotId = bot.Id;
+        action.Action = "wait";
+        botResponse.Actions[0] = action;
+        return botResponse;
     }
-    
 
     private static async Task<GameState> Receive( CancellationToken ct)
     {
@@ -97,6 +208,9 @@ public class GroceryBotClient
                 }
 
                 var json = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                
+                Console.WriteLine($"received JSON: {json.ToString()} ");
+                
                 mappedResult = JsonSerializer.Deserialize<GameState>(json);
                 
                 Console.WriteLine($"Round: {mappedResult?.Round}");
