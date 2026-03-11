@@ -19,11 +19,13 @@ public class GroceryBotClient
     private static readonly Dictionary<int, (string Action, string? ItemId)> LastActionAttempts = new();
     private static readonly Dictionary<int, Queue<(int X, int Y)>> CourierRoutes = new();
     private static readonly Dictionary<int, (string ItemId, int X, int Y)> PickupAccessTargets = new();
+    private static readonly Dictionary<int, int[]> CourierTargets = new();
     private static GameState? LastObservedState;
     private static string? LastPayload;
     private static RoundCache? CurrentRoundCache;
     private static bool DebugLogging;
     private static bool TimingLogging;
+    private const int PlanningSoftLimitMs = 1600;
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNameCaseInsensitive = true
@@ -36,6 +38,7 @@ public class GroceryBotClient
         public HashSet<(int X, int Y)> ReservedCorridorCells { get; init; } = [];
         public Dictionary<string, List<string>> CommittedTypesByOrderId { get; init; } = [];
         public HashSet<string> ReservedItemIds { get; init; } = [];
+        public Dictionary<(int X, int Y), int> DeliveryReservations { get; init; } = [];
     }
 
     private sealed class BotTask
@@ -111,6 +114,11 @@ public class GroceryBotClient
                     break;
                 }
 
+                if (string.Equals(state.ActionStatus, "timeout", StringComparison.OrdinalIgnoreCase))
+                {
+                    HandleTimeout(state);
+                }
+
                 if (state.Bots.Count == 0)
                 {
                     Console.WriteLine("Bots is empty or null");
@@ -120,6 +128,7 @@ public class GroceryBotClient
                 var roundTimer = Stopwatch.StartNew();
                 var decision = new BotResponse
                 {
+                    Round = state.Round,
                     Actions = BuildActions(state)
                 };
                 LogDebug($"decision: {decision}");
@@ -180,6 +189,7 @@ public class GroceryBotClient
 
     private static Actions[] BuildActions(GameState state)
     {
+        var planningStopwatch = Stopwatch.StartNew();
         CurrentRoundCache = CreateRoundCache(state);
         UpdateProgressTracking(state);
         LogMoveOutcomes(state);
@@ -206,21 +216,40 @@ public class GroceryBotClient
             ReservedTargets = [],
             ReservedCorridorCells = [],
             CommittedTypesByOrderId = [],
-            ReservedItemIds = []
+            ReservedItemIds = [],
+            DeliveryReservations = []
         };
 
         var actions = new List<Actions>(state.Bots.Count);
+        var allocationStopwatch = Stopwatch.StartNew();
         var tasksByBotId = AllocateTasks(state, planningOrder, deliveryTargets);
+        allocationStopwatch.Stop();
+        var corridorStopwatch = Stopwatch.StartNew();
         ReserveDeliveryCorridors(state, planningOrder, tasksByBotId, planningContext);
+        corridorStopwatch.Stop();
+        var executeElapsedMs = 0L;
 
         foreach (var bot in planningOrder)
         {
             planningContext.OccupiedPositions.Remove((bot.Position[0], bot.Position[1]));
 
             var task = tasksByBotId.GetValueOrDefault(bot.Id) ?? new BotTask { Kind = "wait" };
-            LogDebug(
-                $"task: bot={bot.Id} role={task.Kind} target={FormatPoint(task.Target ?? [])} item={task.ItemId ?? "-"}");
-            var response = ExecuteTask(bot, task, state, planningContext, deliveryTargets);
+            BotResponse response;
+            var executeStopwatch = Stopwatch.StartNew();
+            if (planningStopwatch.ElapsedMilliseconds >= PlanningSoftLimitMs)
+            {
+                response = BuildEmergencyResponse(bot, state, deliveryTargets, planningContext);
+                LogDebug($"task: bot={bot.Id} role=emergency_fallback");
+            }
+            else
+            {
+                LogDebug(
+                    $"task: bot={bot.Id} role={task.Kind} target={FormatPoint(task.Target ?? [])} item={task.ItemId ?? "-"}");
+                response = ExecuteTask(bot, task, state, planningContext, deliveryTargets);
+            }
+            executeStopwatch.Stop();
+            executeElapsedMs += executeStopwatch.ElapsedMilliseconds;
+
             var action = response.Actions[0];
             var nextPosition = GetNextPosition(bot.Position, action.Action);
             LastActionAttempts[bot.Id] = (action.Action, action.ItemId);
@@ -239,9 +268,26 @@ public class GroceryBotClient
             actions.Add(action);
         }
 
+        if (TimingLogging)
+        {
+            Console.WriteLine(
+                $"timing: round={state.Round} allocate_ms={allocationStopwatch.ElapsedMilliseconds} corridor_ms={corridorStopwatch.ElapsedMilliseconds} execute_ms={executeElapsedMs} total_ms={planningStopwatch.ElapsedMilliseconds}");
+        }
+
         return actions
             .OrderBy(action => action.BotId)
             .ToArray();
+    }
+
+    private static void HandleTimeout(GameState state)
+    {
+        Console.WriteLine($"warning: server reported timeout for round {state.Round - 1}; clearing transient planner state");
+        LastPlannedMoves.Clear();
+        LastActionAttempts.Clear();
+        CourierRoutes.Clear();
+        CourierTargets.Clear();
+        PickupAccessTargets.Clear();
+        CurrentRoundCache = null;
     }
 
     private static Dictionary<int, BotTask> AllocateTasks(
@@ -270,6 +316,7 @@ public class GroceryBotClient
         var activeDemand = GetOutstandingCounts(active);
         var previewDemand = preview == null ? new Dictionary<string, int>() : GetOutstandingCounts(preview);
         var availableBots = new List<Bot>(planningOrder);
+        var largeTeam = planningOrder.Count >= 8;
 
         foreach (var bot in planningOrder)
         {
@@ -283,7 +330,7 @@ public class GroceryBotClient
                 tasksByBotId[bot.Id] = new BotTask
                 {
                     Kind = "deliver",
-                    Target = GetBestTarget(bot.Position, deliveryTargets, state)
+                    Target = SelectDeliveryTarget(bot, state, deliveryTargets, tasksByBotId.Values.ToList())
                 };
                 ConsumeMatchingInventory(bot.Inventory, activeDemand);
                 availableBots.Remove(bot);
@@ -300,21 +347,24 @@ public class GroceryBotClient
         var activeCovered = activeDemand.Values.All(count => count <= 0);
         if (!smallTeam && !endgame && preview != null && activeCovered)
         {
+            var previewPickupCap = largeTeam ? 2 : 1;
+
             foreach (var bot in availableBots.ToList())
             {
                 if (bot.Inventory.Count > 0 && CountMatchingInventory(bot.Inventory, previewDemand) > 0)
                 {
                     tasksByBotId[bot.Id] = new BotTask
                     {
-                        Kind = "pickup_preview",
-                        OrderId = preview.Id
+                        Kind = "hold_preview",
+                        OrderId = preview.Id,
+                        Target = GetBestStageTarget(bot, state, deliveryTargets, tasksByBotId.Values.ToList(), endgame)
                     };
                     ConsumeMatchingInventory(bot.Inventory, previewDemand);
                     availableBots.Remove(bot);
                 }
             }
 
-            var previewAssignments = AssignPickupTasks(availableBots, state, preview, previewDemand, "pickup_preview");
+            var previewAssignments = AssignPickupTasks(availableBots, state, preview, previewDemand, "pickup_preview", previewPickupCap);
             foreach (var pair in previewAssignments)
             {
                 tasksByBotId[pair.Key] = pair.Value;
@@ -331,7 +381,7 @@ public class GroceryBotClient
                     tasksByBotId[bot.Id] = new BotTask
                     {
                         Kind = "deliver",
-                        Target = GetBestTarget(bot.Position, deliveryTargets, state)
+                        Target = SelectDeliveryTarget(bot, state, deliveryTargets, tasksByBotId.Values.ToList())
                     };
                     availableBots.Remove(bot);
                 }
@@ -357,10 +407,11 @@ public class GroceryBotClient
         GameState state,
         Order order,
         Dictionary<string, int> demand,
-        string taskKind)
+        string taskKind,
+        int maxAssignments = int.MaxValue)
     {
         var tasks = new Dictionary<int, BotTask>();
-        if (candidateBots.Count == 0)
+        if (candidateBots.Count == 0 || maxAssignments <= 0)
         {
             return tasks;
         }
@@ -372,7 +423,7 @@ public class GroceryBotClient
         var usedBotIds = new HashSet<int>();
         var usedItemIds = new HashSet<string>();
 
-        while (true)
+        while (tasks.Count < maxAssignments)
         {
             Bot? bestBot = null;
             Item? bestItem = null;
@@ -455,6 +506,13 @@ public class GroceryBotClient
             "deliver" => ExecuteDeliverTask(bot, state, planningContext, task.Target ?? GetBestTarget(bot.Position, deliveryTargets, state), task.Kind),
             "pickup_active" => ExecutePickupTask(bot, state, planningContext, task),
             "pickup_preview" => ExecutePickupTask(bot, state, planningContext, task),
+            "hold_preview" => ExecuteMoveTask(
+                bot,
+                state,
+                planningContext,
+                task.Target ?? GetBestStageTarget(bot, state, deliveryTargets, [], false),
+                false,
+                task.Kind),
             "stage" => ExecuteMoveTask(bot, state, planningContext, task.Target ?? [], false, task.Kind),
             _ => CreateResponse(bot.Id, FindRecoveryAction(bot, state, planningContext.OccupiedPositions, task.Target ?? []))
         };
@@ -470,6 +528,7 @@ public class GroceryBotClient
         if (IsAtAnyTarget(bot.Position, GetDeliveryTargets(state)))
         {
             CourierRoutes.Remove(bot.Id);
+            CourierTargets.Remove(bot.Id);
             return CreateResponse(bot.Id, "drop_off");
         }
 
@@ -478,6 +537,59 @@ public class GroceryBotClient
         var nextPosition = GetNextPosition(bot.Position, action);
         AdvanceCourierRoute(bot.Id, nextPosition);
         return response;
+    }
+
+    private static BotResponse BuildEmergencyResponse(
+        Bot bot,
+        GameState state,
+        List<int[]> deliveryTargets,
+        PlanningContext planningContext)
+    {
+        if (bot.Inventory.Count > 0)
+        {
+            if (IsAtAnyTarget(bot.Position, deliveryTargets))
+            {
+                return CreateResponse(bot.Id, "drop_off");
+            }
+
+            var target = GetBestTarget(bot.Position, deliveryTargets, state);
+            return ExecuteMoveTask(bot, state, planningContext, target, true, "emergency_deliver");
+        }
+
+        var active = state.Orders.FirstOrDefault(order => order.Status == "active");
+        if (active == null)
+        {
+            return CreateResponse(bot.Id, "wait");
+        }
+
+        var needed = GetOutstandingNeeded(active);
+        foreach (var item in state.Items)
+        {
+            if (!needed.Contains(item.Type))
+            {
+                continue;
+            }
+
+            var distance = Math.Abs(bot.Position[0] - item.Position[0]) + Math.Abs(bot.Position[1] - item.Position[1]);
+            if (distance == 1)
+            {
+                return CreateResponse(bot.Id, "pick_up", item.Id);
+            }
+        }
+
+        var targetItem = state.Items
+            .Where(item => needed.Contains(item.Type))
+            .Select(item => new { Item = item, Target = FindAdjacentWalkableTarget(item.Position, state, planningContext.OccupiedPositions, planningContext.ReservedTargets, bot.Position) })
+            .Where(candidate => candidate.Target != null)
+            .OrderBy(candidate => GetHeuristicDistance(bot.Position, candidate.Target!))
+            .FirstOrDefault();
+
+        if (targetItem?.Target != null)
+        {
+            return ExecuteMoveTask(bot, state, planningContext, targetItem.Target, false, "emergency_pickup");
+        }
+
+        return CreateResponse(bot.Id, "wait");
     }
 
     private static BotResponse ExecutePickupTask(
@@ -692,14 +804,14 @@ public class GroceryBotClient
 
     private static List<int[]> GetDeliveryTargets(GameState state)
     {
-        if (state.Drop_off.Length >= 2)
-        {
-            return [state.Drop_off];
-        }
-
         if (state.Drop_off_zones.Count > 0)
         {
             return state.Drop_off_zones.Where(zone => zone.Length >= 2).ToList();
+        }
+
+        if (state.Drop_off.Length >= 2)
+        {
+            return [state.Drop_off];
         }
 
         return [];
@@ -728,6 +840,50 @@ public class GroceryBotClient
             .First();
     }
 
+    private static int[] SelectDeliveryTarget(
+        Bot bot,
+        GameState state,
+        List<int[]> deliveryTargets,
+        List<BotTask> assignedTasks)
+    {
+        if (deliveryTargets.Count <= 1)
+        {
+            var singleTarget = deliveryTargets.FirstOrDefault() ?? [];
+            if (singleTarget.Length >= 2)
+            {
+                CourierTargets[bot.Id] = singleTarget;
+            }
+
+            return singleTarget;
+        }
+
+        if (CourierTargets.TryGetValue(bot.Id, out var existingTarget) &&
+            existingTarget.Length >= 2 &&
+            deliveryTargets.Any(target => target.Length >= 2 && target[0] == existingTarget[0] && target[1] == existingTarget[1]))
+        {
+            return existingTarget;
+        }
+
+        var assignedCounts = assignedTasks
+            .Where(task => task.Kind == "deliver" && task.Target != null && task.Target.Length >= 2)
+            .GroupBy(task => (task.Target![0], task.Target[1]))
+            .ToDictionary(group => group.Key, group => group.Count());
+
+        var selected = deliveryTargets
+            .Where(target => target.Length >= 2)
+            .OrderBy(target => assignedCounts.GetValueOrDefault((target[0], target[1])))
+            .ThenBy(target => GetHeuristicDistance(bot.Position, target))
+            .ThenBy(target => GetPathDistance(bot.Position, target, state))
+            .FirstOrDefault() ?? [];
+
+        if (selected.Length >= 2)
+        {
+            CourierTargets[bot.Id] = selected;
+        }
+
+        return selected;
+    }
+
     private static int[] GetBestTargetForLogging(int[] start, List<int[]> targets)
     {
         if (targets.Count == 0)
@@ -754,12 +910,11 @@ public class GroceryBotClient
 
         var candidates = new List<int[]>();
         var preferredRows = endgame
-            ? new[] { Math.Max(1, state.Grid.Height - 5), Math.Max(1, state.Grid.Height - 6), Math.Max(1, state.Grid.Height - 4) }
-            : new[] { Math.Max(1, state.Grid.Height - 4), Math.Max(1, state.Grid.Height - 5), Math.Max(1, state.Grid.Height - 3) };
-        var minStageX = Math.Max(1, state.Grid.Width / 2);
+            ? new[] { Math.Max(1, state.Grid.Height / 2), Math.Max(1, state.Grid.Height / 2 - 1), Math.Max(1, state.Grid.Height / 2 + 1) }
+            : new[] { Math.Max(1, state.Grid.Height / 3), Math.Max(1, state.Grid.Height / 2), Math.Max(1, state.Grid.Height / 2 - 2) };
         foreach (var y in preferredRows)
         {
-            for (var x = minStageX; x < state.Grid.Width - 1; x++)
+            for (var x = 1; x < state.Grid.Width - 1; x++)
             {
                 var point = new[] { x, y };
                 if (!IsStageCell(point, state, deliveryTargets) || reservedStageTargets.Contains((x, y)))
@@ -777,11 +932,12 @@ public class GroceryBotClient
         }
 
         return candidates
-            .OrderBy(candidate => GetHeuristicDistance(bot.Position, candidate))
-            .ThenByDescending(candidate => deliveryTargets.Count == 0
+            .OrderByDescending(candidate => deliveryTargets.Count == 0
                 ? 0
                 : deliveryTargets.Min(target => GetHeuristicDistance(candidate, target)))
-            .ThenByDescending(candidate => candidate[0])
+            .ThenBy(candidate => GetHeuristicDistance(bot.Position, candidate))
+            .ThenBy(candidate => candidate[1])
+            .ThenBy(candidate => candidate[0])
             .First();
     }
 
@@ -802,7 +958,8 @@ public class GroceryBotClient
             return false;
         }
 
-        if (position[1] >= state.Grid.Height - 2)
+        if (deliveryTargets.Any(target => target.Length >= 2 &&
+            Math.Abs(target[0] - position[0]) + Math.Abs(target[1] - position[1]) <= 3))
         {
             return false;
         }
@@ -902,6 +1059,12 @@ public class GroceryBotClient
             foreach (var neighbor in GetNeighbors(current))
             {
                 if (visited.Contains(neighbor) || !IsPathNodeWalkable(neighbor, targetNode, state))
+                {
+                    continue;
+                }
+
+                if (occupiedPositions.Contains(neighbor) &&
+                    !(neighbor.X == targetNode.X && neighbor.Y == targetNode.Y))
                 {
                     continue;
                 }
@@ -1352,6 +1515,7 @@ public class GroceryBotClient
         if (action.Action == "drop_off")
         {
             CourierRoutes.Remove(bot.Id);
+            CourierTargets.Remove(bot.Id);
         }
     }
 
@@ -1382,13 +1546,34 @@ public class GroceryBotClient
         HashSet<(int X, int Y)> occupiedPositions,
         int[] preferredTarget)
     {
-        var isStuck = StuckRounds.GetValueOrDefault(bot.Id) >= 2;
-        if (!isStuck)
+        var stuckRounds = StuckRounds.GetValueOrDefault(bot.Id);
+        if (stuckRounds == 0)
         {
             return "wait";
         }
 
-        return FindBestImmediateStep(bot.Position, preferredTarget, state, occupiedPositions, [], false) ?? "wait";
+        var preferredStep = FindBestImmediateStep(bot.Position, preferredTarget, state, occupiedPositions, [], false);
+        if (!string.IsNullOrEmpty(preferredStep))
+        {
+            return preferredStep;
+        }
+
+        if (bot.Position.Length < 2)
+        {
+            return "wait";
+        }
+
+        var current = (X: bot.Position[0], Y: bot.Position[1]);
+        var shuffle = GetNeighbors(current)
+            .Where(neighbor => IsWalkable([neighbor.X, neighbor.Y], state, occupiedPositions))
+            .OrderBy(neighbor => CountAdjacentBots(neighbor, occupiedPositions))
+            .ThenByDescending(neighbor => preferredTarget.Length < 2
+                ? 0
+                : Math.Abs(neighbor.X - preferredTarget[0]) + Math.Abs(neighbor.Y - preferredTarget[1]))
+            .Select(neighbor => ToAction(current, neighbor))
+            .FirstOrDefault();
+
+        return shuffle ?? "wait";
     }
 
     private static (string Action, int[] Target)? FindCorridorEscapeAction(
@@ -1618,6 +1803,21 @@ public class GroceryBotClient
             .Select(neighbor => ToAction(startNode, neighbor))
             .FirstOrDefault();
     }
+
+    private static int CountAdjacentBots((int X, int Y) point, HashSet<(int X, int Y)> occupiedPositions)
+    {
+        var count = 0;
+        foreach (var neighbor in GetNeighbors(point))
+        {
+            if (occupiedPositions.Contains(neighbor))
+            {
+                count++;
+            }
+        }
+
+        return count;
+    }
+
 
     private static void PopulateFallbackFields(GameState state, string payloadText)
     {

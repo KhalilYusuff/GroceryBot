@@ -7,6 +7,9 @@ public class GameState
     public string Type { get; set; } = string.Empty;
     public int Round { get; set; }
 
+    [JsonPropertyName("action_status")]
+    public string? ActionStatus { get; set; }
+
     [JsonPropertyName("max_rounds")]
     public int Max_rounds { get; set; }
 
@@ -30,7 +33,7 @@ public class GameState
             ? "null"
             : $"[{string.Join(", ", Drop_off_zones.Select(FormatPoint))}]";
 
-        return $"GameState(Type={Type}, Round={Round}, MaxRounds={Max_rounds}, Grid={Grid}, " +
+        return $"GameState(Type={Type}, Round={Round}, ActionStatus={ActionStatus ?? "null"}, MaxRounds={Max_rounds}, Grid={Grid}, " +
                $"Bots=[{JoinOrEmpty(Bots)}], Items=[{JoinOrEmpty(Items)}], Orders=[{JoinOrEmpty(Orders)}], " +
                $"DropOff={dropOff}, DropOffZones={dropOffZones}, Score={Score})";
     }

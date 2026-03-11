@@ -4,13 +4,16 @@ using System.Text.Json.Serialization;
 
 public class BotResponse
 {
+    [JsonPropertyName("round")]
+    public int? Round { get; set; }
+
     [JsonPropertyName("actions")]
     public Actions[] Actions { get; set; } = [];
 
     public override string ToString()
     {
         var actions = Actions == null ? "null" : $"[{string.Join(", ", Actions)}]";
-        return $"BotResponse(Actions={actions})";
+        return $"BotResponse(Round={Round?.ToString() ?? "null"}, Actions={actions})";
     }
 }
 
