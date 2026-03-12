@@ -30,6 +30,11 @@ public partial class GroceryBotClient
             PickupAccessTargets.Remove(botId);
         }
 
+        foreach (var botId in RoleAssignments.Keys.Where(botId => !activeBotIds.Contains(botId)).ToList())
+        {
+            RoleAssignments.Remove(botId);
+        }
+
         foreach (var bot in state.Bots.Where(bot => bot.Position.Length >= 2))
         {
             var currentPosition = (bot.Position[0], bot.Position[1]);
@@ -172,6 +177,7 @@ public partial class GroceryBotClient
                         previousDelivered != string.Join(",", order.Items_delivered));
                     if (!inventoryChanged && !ordersChanged && current.Score == previous.Score)
                     {
+                        RecentDropoffNoEffectCount++;
                         LogDebug($"feedback: bot={bot.Id} drop_off_no_effect");
                     }
 
@@ -182,6 +188,7 @@ public partial class GroceryBotClient
                     var itemRemoved = !string.IsNullOrEmpty(attempt.ItemId) && !currentItems.Contains(attempt.ItemId);
                     if (!inventoryChanged && !itemRemoved)
                     {
+                        RecentPickupNoEffectCount++;
                         LogDebug($"feedback: bot={bot.Id} pick_up_no_effect item={attempt.ItemId}");
                     }
 
@@ -199,5 +206,41 @@ public partial class GroceryBotClient
         }
 
         Console.WriteLine(message);
+    }
+
+    private static void MaybeLogRoundSummary(GameState state)
+    {
+        if (state.Round == 0)
+        {
+            LastObservedScore = state.Score;
+            RecentPickupNoEffectCount = 0;
+            RecentDropoffNoEffectCount = 0;
+            return;
+        }
+
+        if (state.Round % SummaryIntervalRounds != 0 &&
+            state.Round != state.Max_rounds - 1)
+        {
+            return;
+        }
+
+        var active = state.Orders.FirstOrDefault(order => order.Status == "active");
+        var preview = state.Orders.FirstOrDefault(order => order.Status == "preview");
+        var activeOutstanding = active == null ? 0 : GetOutstandingCounts(active).Values.Where(count => count > 0).Sum();
+        var previewOutstanding = preview == null ? 0 : GetOutstandingCounts(preview).Values.Where(count => count > 0).Sum();
+        var activeDemand = active == null ? new Dictionary<string, int>() : GetOutstandingCounts(active);
+        var previewDemand = preview == null ? new Dictionary<string, int>() : GetOutstandingCounts(preview);
+        var carryingActive = state.Bots.Count(bot => CountMatchingInventory(bot.Inventory, activeDemand) > 0);
+        var carryingPreview = state.Bots.Count(bot => CountMatchingInventory(bot.Inventory, previewDemand) > 0);
+        var scoreDelta = state.Score - LastObservedScore;
+
+        Console.WriteLine(
+            $"round_summary: planner={PlannerVersion} round={state.Round} score={state.Score} score_delta={scoreDelta} active_outstanding={activeOutstanding} preview_outstanding={previewOutstanding} " +
+            $"carry_active={carryingActive} carry_preview={carryingPreview} pickup_no_effect={RecentPickupNoEffectCount} dropoff_no_effect={RecentDropoffNoEffectCount} " +
+            $"roles=({LastRoleSummary ?? "none"}) tasks=({LastTaskSummary ?? "none"})");
+
+        LastObservedScore = state.Score;
+        RecentPickupNoEffectCount = 0;
+        RecentDropoffNoEffectCount = 0;
     }
 }

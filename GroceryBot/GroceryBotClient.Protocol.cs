@@ -158,6 +158,7 @@ public partial class GroceryBotClient
 
         LastPlannedMoves.Clear();
         LastActionAttempts.Clear();
+        RoleAssignments.Clear();
         CourierRoutes.Clear();
         CourierTargets.Clear();
         PickupAccessTargets.Clear();
@@ -170,6 +171,7 @@ public partial class GroceryBotClient
         StuckRounds.Clear();
         LastPlannedMoves.Clear();
         LastActionAttempts.Clear();
+        RoleAssignments.Clear();
         CourierRoutes.Clear();
         PickupAccessTargets.Clear();
         CourierTargets.Clear();
@@ -177,6 +179,10 @@ public partial class GroceryBotClient
         KnownShelfCells.Clear();
         CurrentRoundCache = null;
         LastTaskSummary = null;
+        LastRoleSummary = null;
+        LastObservedScore = 0;
+        RecentPickupNoEffectCount = 0;
+        RecentDropoffNoEffectCount = 0;
         RecoveryRoundsRemaining = 0;
     }
 

@@ -12,6 +12,7 @@ public partial class GroceryBotClient
     private static readonly Dictionary<int, int> StuckRounds = new();
     private static readonly Dictionary<int, (string Action, int X, int Y)> LastPlannedMoves = new();
     private static readonly Dictionary<int, (string Action, string? ItemId)> LastActionAttempts = new();
+    private static readonly Dictionary<int, RoleAssignment> RoleAssignments = new();
     private static readonly Dictionary<int, Queue<(int X, int Y)>> CourierRoutes = new();
     private static readonly Dictionary<int, (string ItemId, int X, int Y)> PickupAccessTargets = new();
     private static readonly Dictionary<int, int[]> CourierTargets = new();
@@ -20,6 +21,10 @@ public partial class GroceryBotClient
     private static string? LastPlannerTiming;
     private static string? LastRoundTiming;
     private static string? LastTaskSummary;
+    private static string? LastRoleSummary;
+    private static int LastObservedScore;
+    private static int RecentPickupNoEffectCount;
+    private static int RecentDropoffNoEffectCount;
     private static int RecoveryRoundsRemaining;
     private static GameState? LastObservedState;
     private static string? LastPayload;
@@ -30,6 +35,9 @@ public partial class GroceryBotClient
     private const int PlanningSoftLimitMs = 1600;
     private const int RecoveryWindowRounds = 12;
     private const int EndgameRounds = 35;
+    private const int RoleLockRounds = 10;
+    private const int SummaryIntervalRounds = 25;
+    private const string PlannerVersion = "role-v4";
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -54,6 +62,12 @@ public partial class GroceryBotClient
         public string? ItemId { get; init; }
         public string? ItemType { get; init; }
         public int[]? Target { get; init; }
+    }
+
+    private sealed class RoleAssignment
+    {
+        public required string Role { get; init; }
+        public required int LockedUntilRound { get; init; }
     }
 
     private sealed class PickupCandidate

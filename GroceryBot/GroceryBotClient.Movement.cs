@@ -182,8 +182,11 @@ public partial class GroceryBotClient
             return singleTarget;
         }
 
-        if (CourierTargets.TryGetValue(bot.Id, out var existingTarget) &&
+        var stuckRounds = StuckRounds.GetValueOrDefault(bot.Id);
+        CourierTargets.TryGetValue(bot.Id, out var existingTarget);
+        if (existingTarget != null &&
             existingTarget.Length >= 2 &&
+            stuckRounds < 3 &&
             deliveryTargets.Any(target => target.Length >= 2 && target[0] == existingTarget[0] && target[1] == existingTarget[1]))
         {
             return existingTarget;
@@ -197,16 +200,70 @@ public partial class GroceryBotClient
         var selected = deliveryTargets
             .Where(target => target.Length >= 2)
             .OrderBy(target => assignedCounts.GetValueOrDefault((target[0], target[1])))
+            .ThenBy(target => stuckRounds >= 3
+                ? GetPathDistance(bot.Position, target, state)
+                : 0)
             .ThenBy(target => GetHeuristicDistance(bot.Position, target))
             .ThenBy(target => GetPathDistance(bot.Position, target, state))
             .FirstOrDefault() ?? [];
 
         if (selected.Length >= 2)
         {
+            if (stuckRounds >= 3 &&
+                existingTarget?.Length >= 2 &&
+                (existingTarget[0] != selected[0] || existingTarget[1] != selected[1]))
+            {
+                CourierRoutes.Remove(bot.Id);
+            }
+
             CourierTargets[bot.Id] = selected;
         }
 
         return selected;
+    }
+
+    private static int[] GetBestCourierQueueTarget(
+        Bot bot,
+        GameState state,
+        List<int[]> deliveryTargets,
+        List<BotTask> assignedTasks)
+    {
+        if (deliveryTargets.Count == 0)
+        {
+            return GetBestStageTarget(bot, state, deliveryTargets, assignedTasks, false);
+        }
+
+        var zone = CourierTargets.TryGetValue(bot.Id, out var preferredZone) &&
+                   preferredZone.Length >= 2 &&
+                   deliveryTargets.Any(target => target.Length >= 2 && target[0] == preferredZone[0] && target[1] == preferredZone[1])
+            ? preferredZone
+            : SelectDeliveryTarget(bot, state, deliveryTargets, assignedTasks);
+
+        if (zone.Length < 2)
+        {
+            return GetBestStageTarget(bot, state, deliveryTargets, assignedTasks, false);
+        }
+
+        var reservedTargets = assignedTasks
+            .Where(task => task.Target != null && task.Target.Length >= 2)
+            .Select(task => (task.Target![0], task.Target[1]))
+            .ToHashSet();
+
+        var candidates = GetAdjacentTargets(zone)
+            .Concat(GetNeighbors((zone[0], zone[1])).SelectMany(GetNeighbors).Select(node => new[] { node.X, node.Y }))
+            .Where(point => point.Length >= 2)
+            .Where(point => !(point[0] == zone[0] && point[1] == zone[1]))
+            .Where(point => !reservedTargets.Contains((point[0], point[1])))
+            .Where(point => !IsStaticBlocked(point[0], point[1], state))
+            .Where(point => point[0] >= 0 && point[0] < state.Grid.Width && point[1] >= 0 && point[1] < state.Grid.Height)
+            .DistinctBy(point => (point[0], point[1]))
+            .OrderBy(point => GetHeuristicDistance(point, zone))
+            .ThenBy(point => GetPathDistance(bot.Position, point, state))
+            .ThenBy(point => point[1])
+            .ThenBy(point => point[0])
+            .FirstOrDefault();
+
+        return candidates ?? GetBestStageTarget(bot, state, deliveryTargets, assignedTasks, false);
     }
 
     private static int[] GetBestStageTarget(
