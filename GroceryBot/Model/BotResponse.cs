@@ -5,6 +5,7 @@ using System.Text.Json.Serialization;
 public class BotResponse
 {
     [JsonPropertyName("round")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public int? Round { get; set; }
 
     [JsonPropertyName("actions")]

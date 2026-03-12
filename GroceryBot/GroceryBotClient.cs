@@ -1,194 +1,18 @@
 using GroceryBot.Model;
-using System.Linq;
-using System.Collections.Generic;
+using System.Diagnostics;
+using System.Text.Json;
 
 namespace GroceryBot;
-using System.Net.WebSockets;
-using System.Diagnostics;
-using System.Text;
-using System.Text.Json;
-using DotNetEnv;
 
-public class GroceryBotClient
+public partial class GroceryBotClient
 {
-    private static string? _wsUrl; 
-    private static readonly ClientWebSocket _socket = new();
-    private static readonly Dictionary<int, (int X, int Y)> LastPositions = new();
-    private static readonly Dictionary<int, int> StuckRounds = new();
-    private static readonly Dictionary<int, (string Action, int X, int Y)> LastPlannedMoves = new();
-    private static readonly Dictionary<int, (string Action, string? ItemId)> LastActionAttempts = new();
-    private static readonly Dictionary<int, Queue<(int X, int Y)>> CourierRoutes = new();
-    private static readonly Dictionary<int, (string ItemId, int X, int Y)> PickupAccessTargets = new();
-    private static readonly Dictionary<int, int[]> CourierTargets = new();
-    private static GameState? LastObservedState;
-    private static string? LastPayload;
-    private static RoundCache? CurrentRoundCache;
-    private static bool DebugLogging;
-    private static bool TimingLogging;
-    private const int PlanningSoftLimitMs = 1600;
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        PropertyNameCaseInsensitive = true
-    };
-
-    private sealed class PlanningContext
-    {
-        public HashSet<(int X, int Y)> OccupiedPositions { get; init; } = [];
-        public HashSet<(int X, int Y)> ReservedTargets { get; init; } = [];
-        public HashSet<(int X, int Y)> ReservedCorridorCells { get; init; } = [];
-        public Dictionary<string, List<string>> CommittedTypesByOrderId { get; init; } = [];
-        public HashSet<string> ReservedItemIds { get; init; } = [];
-        public Dictionary<(int X, int Y), int> DeliveryReservations { get; init; } = [];
-    }
-
-    private sealed class BotTask
-    {
-        public required string Kind { get; init; }
-        public string? OrderId { get; init; }
-        public string? ItemId { get; init; }
-        public string? ItemType { get; init; }
-        public int[]? Target { get; init; }
-    }
-
-    private sealed class RoundCache
-    {
-        public required HashSet<(int X, int Y)> WallCells { get; init; }
-        public required HashSet<(int X, int Y)> ShelfCells { get; init; }
-        public Dictionary<(int StartX, int StartY, int TargetX, int TargetY), int> DistanceCache { get; } = [];
-        public Dictionary<(int StartX, int StartY, int TargetX, int TargetY), List<(int X, int Y)>> PathCache { get; } = [];
-    }
-
-    private const int EndgameRounds = 35;
-
-    public static async Task Play()
-    {
-        Env.Load();
-        DebugLogging = string.Equals(Environment.GetEnvironmentVariable("GROCERY_DEBUG"), "1", StringComparison.Ordinal);
-        TimingLogging = string.Equals(Environment.GetEnvironmentVariable("GROCERY_TIMING"), "1", StringComparison.Ordinal);
-        
-        _wsUrl = Environment.GetEnvironmentVariable("GROCERY_WS_URL");
-        
-        if (String.IsNullOrEmpty(_wsUrl))
-        {
-            Console.WriteLine($"url must not be empty.");
-            return;
-        }
-        using var cts = new CancellationTokenSource();
-        Console.CancelKeyPress += (_, e) =>
-        {
-            e.Cancel = true;
-            cts.Cancel();
-        };
-        
-        Console.WriteLine($"Connecting to websocket");
-        
-        try
-        {
-            await _socket.ConnectAsync(new Uri(_wsUrl), cts.Token);
-        }
-        catch (WebSocketException ex)
-        {
-            Console.WriteLine($"Connection failed: {ex.Message}");
-            Console.WriteLine("In case of 403 generate fresh token");
-            return;
-        }
-        
-        Console.WriteLine("Connected. Bot is moving. Press Ctrl+C to stop.");
-
-        try
-        {
-            while (true)
-            {
-                var state = await Receive(cts.Token);
-                
-                LogDebug($"received: {state}");
-                if (DebugLogging)
-                {
-                    LogStateDelta(LastObservedState, state, LastPayload);
-                    LastObservedState = state;
-                }
-
-                if (state.Type == "game_over")
-                {
-                    Console.WriteLine($"game over! Score: {state.Score}");
-                    break;
-                }
-
-                if (string.Equals(state.ActionStatus, "timeout", StringComparison.OrdinalIgnoreCase))
-                {
-                    HandleTimeout(state);
-                }
-
-                if (state.Bots.Count == 0)
-                {
-                    Console.WriteLine("Bots is empty or null");
-                    break;
-                }
-
-                var roundTimer = Stopwatch.StartNew();
-                var decision = new BotResponse
-                {
-                    Round = state.Round,
-                    Actions = BuildActions(state)
-                };
-                LogDebug($"decision: {decision}");
-                LogDebug(string.Empty);
-                var payload = JsonSerializer.Serialize(decision, JsonOptions);
-                LogDebug($"payload: {payload}");
-                if (DebugLogging)
-                {
-                    LastPayload = payload;
-                }
-
-                await _socket.SendAsync(
-                    Encoding.UTF8.GetBytes(payload),
-                    WebSocketMessageType.Text,
-                    true,
-                    cts.Token
-                );
-
-                roundTimer.Stop();
-                if (TimingLogging && roundTimer.ElapsedMilliseconds >= 1500)
-                {
-                    Console.WriteLine(
-                        $"warning: slow round round={state.Round} decision_ms={roundTimer.ElapsedMilliseconds} actions={decision.Actions.Length}");
-                }
-            }
-        }
-        catch (OperationCanceledException) when (cts.IsCancellationRequested)
-        {
-            Console.WriteLine("Cancelled.");
-        }
-        catch (WebSocketException ex)
-        {
-            Console.WriteLine($"WebSocket disconnected: {ex.Message}");
-        }
-        catch (IOException ex)
-        {
-            Console.WriteLine($"Transport closed: {ex.Message}");
-        }
-    }
-
-    private static BotResponse MoveToward(Bot bot, GameState state, int[] target, HashSet<(int X, int Y)> occupiedPositions)
-    {
-        var nextAction = FindPathAction(bot.Position, target, state, occupiedPositions, [], false);
-        return CreateResponse(bot.Id, nextAction);
-    }
-
-    private static BotResponse MoveToward(
-        Bot bot,
-        GameState state,
-        int[] target,
-        HashSet<(int X, int Y)> occupiedPositions,
-        HashSet<(int X, int Y)> reservedCorridorCells,
-        bool prioritizeCourier)
-    {
-        var nextAction = FindPathAction(bot.Position, target, state, occupiedPositions, reservedCorridorCells, prioritizeCourier);
-        return CreateResponse(bot.Id, nextAction);
-    }
-
     private static Actions[] BuildActions(GameState state)
     {
+        if (state.Round == 0)
+        {
+            ResetGameTracking();
+        }
+
         var planningStopwatch = Stopwatch.StartNew();
         CurrentRoundCache = CreateRoundCache(state);
         UpdateProgressTracking(state);
@@ -224,9 +48,12 @@ public class GroceryBotClient
         var allocationStopwatch = Stopwatch.StartNew();
         var tasksByBotId = AllocateTasks(state, planningOrder, deliveryTargets);
         allocationStopwatch.Stop();
-        var corridorStopwatch = Stopwatch.StartNew();
-        ReserveDeliveryCorridors(state, planningOrder, tasksByBotId, planningContext);
-        corridorStopwatch.Stop();
+        LastTaskSummary = string.Join(
+            " ",
+            tasksByBotId.Values
+                .GroupBy(task => task.Kind)
+                .OrderBy(group => group.Key)
+                .Select(group => $"{group.Key}={group.Count()}"));
         var executeElapsedMs = 0L;
 
         foreach (var bot in planningOrder)
@@ -268,26 +95,12 @@ public class GroceryBotClient
             actions.Add(action);
         }
 
-        if (TimingLogging)
-        {
-            Console.WriteLine(
-                $"timing: round={state.Round} allocate_ms={allocationStopwatch.ElapsedMilliseconds} corridor_ms={corridorStopwatch.ElapsedMilliseconds} execute_ms={executeElapsedMs} total_ms={planningStopwatch.ElapsedMilliseconds}");
-        }
+        LastPlannerTiming =
+            $"timing: round={state.Round} allocate_ms={allocationStopwatch.ElapsedMilliseconds} corridor_ms=0 execute_ms={executeElapsedMs} total_ms={planningStopwatch.ElapsedMilliseconds}";
 
         return actions
             .OrderBy(action => action.BotId)
             .ToArray();
-    }
-
-    private static void HandleTimeout(GameState state)
-    {
-        Console.WriteLine($"warning: server reported timeout for round {state.Round - 1}; clearing transient planner state");
-        LastPlannedMoves.Clear();
-        LastActionAttempts.Clear();
-        CourierRoutes.Clear();
-        CourierTargets.Clear();
-        PickupAccessTargets.Clear();
-        CurrentRoundCache = null;
     }
 
     private static Dictionary<int, BotTask> AllocateTasks(
@@ -299,14 +112,17 @@ public class GroceryBotClient
         var active = state.Orders.FirstOrDefault(o => o.Status == "active");
         var preview = state.Orders.FirstOrDefault(o => o.Status == "preview");
         var endgame = state.Max_rounds > 0 && state.Round >= state.Max_rounds - EndgameRounds;
-        var smallTeam = planningOrder.Count <= 3;
+        var teamSize = planningOrder.Count;
+        var smallTeam = teamSize <= 5;
+        var largeTeam = teamSize >= 10;
+        var recoveryMode = RecoveryRoundsRemaining > 0;
 
         if (active == null)
         {
             foreach (var bot in planningOrder)
             {
                 tasksByBotId[bot.Id] = bot.Inventory.Count > 0
-                    ? new BotTask { Kind = "deliver", Target = GetBestTarget(bot.Position, deliveryTargets, state) }
+                    ? new BotTask { Kind = "deliver", Target = SelectDeliveryTarget(bot, state, deliveryTargets, tasksByBotId.Values.ToList()) }
                     : new BotTask { Kind = "stage", Target = GetBestStageTarget(bot, state, deliveryTargets, tasksByBotId.Values.ToList(), endgame) };
             }
 
@@ -315,8 +131,10 @@ public class GroceryBotClient
 
         var activeDemand = GetOutstandingCounts(active);
         var previewDemand = preview == null ? new Dictionary<string, int>() : GetOutstandingCounts(preview);
+        var previewPickupCap = teamSize >= 8 && preview != null
+            ? previewDemand.Values.Where(count => count > 0).Sum()
+            : 0;
         var availableBots = new List<Bot>(planningOrder);
-        var largeTeam = planningOrder.Count >= 8;
 
         foreach (var bot in planningOrder)
         {
@@ -325,66 +143,109 @@ public class GroceryBotClient
                 continue;
             }
 
-            if (CountMatchingInventory(bot.Inventory, activeDemand) > 0 || bot.Inventory.Count >= 3)
+            var activeMatches = CountMatchingInventory(bot.Inventory, activeDemand);
+            if (activeMatches > 0)
             {
+                var continuePickupTask = TryAssignContinuedPickupTask(
+                    bot,
+                    state,
+                    activeDemand,
+                    active.Id,
+                    deliveryTargets);
+                ConsumeMatchingInventory(bot.Inventory, activeDemand);
+
+                if (continuePickupTask != null)
+                {
+                    tasksByBotId[bot.Id] = continuePickupTask;
+                    activeDemand[continuePickupTask.ItemType!] = activeDemand.GetValueOrDefault(continuePickupTask.ItemType!) - 1;
+                    availableBots.Remove(bot);
+                    continue;
+                }
+
                 tasksByBotId[bot.Id] = new BotTask
                 {
                     Kind = "deliver",
                     Target = SelectDeliveryTarget(bot, state, deliveryTargets, tasksByBotId.Values.ToList())
                 };
-                ConsumeMatchingInventory(bot.Inventory, activeDemand);
+                availableBots.Remove(bot);
+                continue;
+            }
+
+            if (bot.Inventory.Count >= 3)
+            {
+                tasksByBotId[bot.Id] = new BotTask
+                {
+                    Kind = "stage",
+                    Target = GetBestStageTarget(bot, state, deliveryTargets, tasksByBotId.Values.ToList(), endgame)
+                };
                 availableBots.Remove(bot);
             }
         }
 
-        var activeAssignments = AssignPickupTasks(availableBots, state, active, activeDemand, "pickup_active");
+        foreach (var bot in availableBots.ToList())
+        {
+            if (bot.Inventory.Count == 0)
+            {
+                continue;
+            }
+
+            if (!smallTeam && !recoveryMode && preview != null && CountMatchingInventory(bot.Inventory, previewDemand) > 0)
+            {
+                tasksByBotId[bot.Id] = new BotTask
+                {
+                    Kind = "hold_preview",
+                    OrderId = preview.Id,
+                    Target = GetBestPreviewHoldTarget(bot, state, deliveryTargets, tasksByBotId.Values.ToList())
+                };
+                ConsumeMatchingInventory(bot.Inventory, previewDemand);
+                availableBots.Remove(bot);
+                continue;
+            }
+
+            tasksByBotId[bot.Id] = new BotTask
+            {
+                Kind = largeTeam ? "park" : "stage",
+                Target = largeTeam
+                    ? GetBestParkingTarget(bot, state, deliveryTargets, tasksByBotId.Values.ToList())
+                    : GetBestStageTarget(bot, state, deliveryTargets, tasksByBotId.Values.ToList(), endgame)
+            };
+            availableBots.Remove(bot);
+        }
+
+        var activeAssignments = AssignPickupTasks(availableBots, state, active, activeDemand, deliveryTargets, "pickup_active");
         foreach (var pair in activeAssignments)
         {
             tasksByBotId[pair.Key] = pair.Value;
             availableBots.RemoveAll(bot => bot.Id == pair.Key);
         }
 
-        var activeCovered = activeDemand.Values.All(count => count <= 0);
-        if (!smallTeam && !endgame && preview != null && activeCovered)
+        if (largeTeam && availableBots.Count > 0 && activeDemand.Values.Any(count => count > 0))
         {
-            var previewPickupCap = largeTeam ? 2 : 1;
-
-            foreach (var bot in availableBots.ToList())
-            {
-                if (bot.Inventory.Count > 0 && CountMatchingInventory(bot.Inventory, previewDemand) > 0)
-                {
-                    tasksByBotId[bot.Id] = new BotTask
-                    {
-                        Kind = "hold_preview",
-                        OrderId = preview.Id,
-                        Target = GetBestStageTarget(bot, state, deliveryTargets, tasksByBotId.Values.ToList(), endgame)
-                    };
-                    ConsumeMatchingInventory(bot.Inventory, previewDemand);
-                    availableBots.Remove(bot);
-                }
-            }
-
-            var previewAssignments = AssignPickupTasks(availableBots, state, preview, previewDemand, "pickup_preview", previewPickupCap);
-            foreach (var pair in previewAssignments)
+            var supportAssignments = AssignActiveSupportTasks(
+                availableBots,
+                state,
+                activeDemand,
+                deliveryTargets,
+                tasksByBotId.Values.ToList(),
+                Math.Min(3, availableBots.Count));
+            foreach (var pair in supportAssignments)
             {
                 tasksByBotId[pair.Key] = pair.Value;
                 availableBots.RemoveAll(bot => bot.Id == pair.Key);
             }
         }
 
-        if (smallTeam && activeCovered)
+        var activeCovered = activeDemand.Values.All(count => count <= 0);
+        if (!smallTeam && !recoveryMode && preview != null && previewPickupCap > 0)
         {
-            foreach (var bot in availableBots.ToList())
+            var parallelPreviewCap = activeCovered
+                ? previewPickupCap
+                : Math.Min(previewPickupCap, Math.Max(1, teamSize / 6));
+            var previewAssignments = AssignPickupTasks(availableBots, state, preview, previewDemand, deliveryTargets, "pickup_preview", parallelPreviewCap);
+            foreach (var pair in previewAssignments)
             {
-                if (bot.Inventory.Count > 0)
-                {
-                    tasksByBotId[bot.Id] = new BotTask
-                    {
-                        Kind = "deliver",
-                        Target = SelectDeliveryTarget(bot, state, deliveryTargets, tasksByBotId.Values.ToList())
-                    };
-                    availableBots.Remove(bot);
-                }
+                tasksByBotId[pair.Key] = pair.Value;
+                availableBots.RemoveAll(bot => bot.Id == pair.Key);
             }
         }
 
@@ -393,8 +254,10 @@ public class GroceryBotClient
         {
             tasksByBotId[bot.Id] = new BotTask
             {
-                Kind = "stage",
-                Target = GetBestStageTarget(bot, state, deliveryTargets, assignedTasks, endgame)
+                Kind = largeTeam ? "park" : "stage",
+                Target = largeTeam
+                    ? GetBestParkingTarget(bot, state, deliveryTargets, assignedTasks)
+                    : GetBestStageTarget(bot, state, deliveryTargets, assignedTasks, endgame)
             };
             assignedTasks.Add(tasksByBotId[bot.Id]);
         }
@@ -407,6 +270,7 @@ public class GroceryBotClient
         GameState state,
         Order order,
         Dictionary<string, int> demand,
+        List<int[]> deliveryTargets,
         string taskKind,
         int maxAssignments = int.MaxValue)
     {
@@ -426,42 +290,38 @@ public class GroceryBotClient
         while (tasks.Count < maxAssignments)
         {
             Bot? bestBot = null;
-            Item? bestItem = null;
-            var bestDistance = int.MaxValue;
+            PickupCandidate? bestCandidate = null;
 
             foreach (var bot in candidateBots)
             {
-                if (usedBotIds.Contains(bot.Id) || bot.Inventory.Count > 0)
+                if (usedBotIds.Contains(bot.Id) || bot.Inventory.Count >= 3)
                 {
                     continue;
                 }
 
-                foreach (var item in candidateItems)
+                var candidate = FindBestPickupCandidate(
+                    bot,
+                    candidateItems,
+                    demand,
+                    state,
+                    deliveryTargets,
+                    usedItemIds,
+                    taskKind == "pickup_active");
+                if (candidate == null)
                 {
-                    if (usedItemIds.Contains(item.Id) || demand.GetValueOrDefault(item.Type) <= 0)
-                    {
-                        continue;
-                    }
-
-                    var target = FindAdjacentWalkableTarget(item.Position, state, [], [], bot.Position);
-                    if (target == null)
-                    {
-                        continue;
-                    }
-
-                    var distance = GetHeuristicDistance(bot.Position, target);
-                    if (distance >= bestDistance)
-                    {
-                        continue;
-                    }
-
-                    bestDistance = distance;
-                    bestBot = bot;
-                    bestItem = item;
+                    continue;
                 }
+
+                if (bestCandidate != null && candidate.Score >= bestCandidate.Score)
+                {
+                    continue;
+                }
+
+                bestBot = bot;
+                bestCandidate = candidate;
             }
 
-            if (bestBot == null || bestItem == null)
+            if (bestBot == null || bestCandidate == null)
             {
                 break;
             }
@@ -470,15 +330,115 @@ public class GroceryBotClient
             {
                 Kind = taskKind,
                 OrderId = order.Id,
-                ItemId = bestItem.Id,
-                ItemType = bestItem.Type
+                ItemId = bestCandidate.Item.Id,
+                ItemType = bestCandidate.Item.Type,
+                Target = bestCandidate.AccessTarget
             };
             usedBotIds.Add(bestBot.Id);
-            usedItemIds.Add(bestItem.Id);
-            demand[bestItem.Type] = demand.GetValueOrDefault(bestItem.Type) - 1;
+            usedItemIds.Add(bestCandidate.Item.Id);
+            demand[bestCandidate.Item.Type] = demand.GetValueOrDefault(bestCandidate.Item.Type) - 1;
         }
 
         return tasks;
+    }
+
+    private static Dictionary<int, BotTask> AssignActiveSupportTasks(
+        List<Bot> candidateBots,
+        GameState state,
+        Dictionary<string, int> activeDemand,
+        List<int[]> deliveryTargets,
+        List<BotTask> assignedTasks,
+        int maxAssignments)
+    {
+        var tasks = new Dictionary<int, BotTask>();
+        var reservedTargets = assignedTasks
+            .Where(task => task.Target != null && task.Target.Length >= 2)
+            .Select(task => (task.Target![0], task.Target[1]))
+            .ToHashSet();
+
+        foreach (var bot in candidateBots)
+        {
+            if (tasks.Count >= maxAssignments || bot.Inventory.Count >= 3)
+            {
+                continue;
+            }
+
+            var target = GetBestActiveSupportTarget(bot, state, activeDemand, deliveryTargets, reservedTargets);
+            if (target == null)
+            {
+                continue;
+            }
+
+            tasks[bot.Id] = new BotTask
+            {
+                Kind = "support_active",
+                Target = target
+            };
+            reservedTargets.Add((target[0], target[1]));
+        }
+
+        return tasks;
+    }
+
+    private static BotTask? TryAssignContinuedPickupTask(
+        Bot bot,
+        GameState state,
+        Dictionary<string, int> activeDemand,
+        string orderId,
+        List<int[]> deliveryTargets)
+    {
+        if (bot.Inventory.Count >= 3)
+        {
+            return null;
+        }
+
+        var remainingDemand = new Dictionary<string, int>(activeDemand, StringComparer.Ordinal);
+        ConsumeMatchingInventory(bot.Inventory, remainingDemand);
+        if (remainingDemand.Values.All(count => count <= 0))
+        {
+            return null;
+        }
+
+        var candidate = FindBestPickupCandidate(
+            bot,
+            state.Items,
+            remainingDemand,
+            state,
+            deliveryTargets,
+            [],
+            true);
+        if (candidate == null)
+        {
+            return null;
+        }
+
+        var deliveryTarget = SelectDeliveryTarget(bot, state, deliveryTargets, []);
+        if (deliveryTarget.Length < 2)
+        {
+            return null;
+        }
+
+        var directDeliveryDistance = GetPathDistance(bot.Position, deliveryTarget, state);
+        if (directDeliveryDistance == int.MaxValue)
+        {
+            return null;
+        }
+
+        var pickupThenDeliverDistance = candidate.PickupDistance + candidate.DeliveryDistance;
+        var allowedDetour = 4 + ((3 - bot.Inventory.Count) * 2);
+        if (pickupThenDeliverDistance > directDeliveryDistance + allowedDetour)
+        {
+            return null;
+        }
+
+        return new BotTask
+        {
+            Kind = "pickup_active",
+            OrderId = orderId,
+            ItemId = candidate.Item.Id,
+            ItemType = candidate.Item.Type,
+            Target = candidate.AccessTarget
+        };
     }
 
     private static BotResponse ExecuteTask(
@@ -488,31 +448,20 @@ public class GroceryBotClient
         PlanningContext planningContext,
         List<int[]> deliveryTargets)
     {
-        if (task.Kind != "deliver" &&
-            bot.Position.Length >= 2 &&
-            (planningContext.ReservedCorridorCells.Contains((bot.Position[0], bot.Position[1])) ||
-             IsAtAnyTarget(bot.Position, deliveryTargets)))
-        {
-            var corridorEscape = FindCorridorEscapeAction(bot, state, planningContext);
-            if (corridorEscape is { } escape)
-            {
-                LogMoveDiagnostics(bot, state, escape.Target, escape.Action, $"{task.Kind}:escape");
-                return CreateResponse(bot.Id, escape.Action);
-            }
-        }
-
         return task.Kind switch
         {
             "deliver" => ExecuteDeliverTask(bot, state, planningContext, task.Target ?? GetBestTarget(bot.Position, deliveryTargets, state), task.Kind),
             "pickup_active" => ExecutePickupTask(bot, state, planningContext, task),
             "pickup_preview" => ExecutePickupTask(bot, state, planningContext, task),
+            "support_active" => ExecuteSupportActiveTask(bot, state, planningContext, task),
             "hold_preview" => ExecuteMoveTask(
                 bot,
                 state,
                 planningContext,
-                task.Target ?? GetBestStageTarget(bot, state, deliveryTargets, [], false),
+                task.Target ?? GetBestPreviewHoldTarget(bot, state, deliveryTargets, []),
                 false,
                 task.Kind),
+            "park" => ExecuteParkTask(bot, state, planningContext, task, deliveryTargets),
             "stage" => ExecuteMoveTask(bot, state, planningContext, task.Target ?? [], false, task.Kind),
             _ => CreateResponse(bot.Id, FindRecoveryAction(bot, state, planningContext.OccupiedPositions, task.Target ?? []))
         };
@@ -579,7 +528,7 @@ public class GroceryBotClient
 
         var targetItem = state.Items
             .Where(item => needed.Contains(item.Type))
-            .Select(item => new { Item = item, Target = FindAdjacentWalkableTarget(item.Position, state, planningContext.OccupiedPositions, planningContext.ReservedTargets, bot.Position) })
+            .Select(item => new { Target = FindAdjacentWalkableTarget(item.Position, state, planningContext.OccupiedPositions, planningContext.ReservedTargets, bot.Position), item.Id })
             .Where(candidate => candidate.Target != null)
             .OrderBy(candidate => GetHeuristicDistance(bot.Position, candidate.Target!))
             .FirstOrDefault();
@@ -619,887 +568,72 @@ public class GroceryBotClient
             }
         }
 
-        var target = GetPickupAccessTarget(bot, item, state, planningContext);
-
+        var target = task.Target != null && task.Target.Length >= 2 && IsAccessiblePickupTarget(bot, task.Target, state, planningContext)
+            ? task.Target
+            : GetPickupAccessTarget(bot, item, state, planningContext);
         if (target == null)
         {
             PickupAccessTargets.Remove(bot.Id);
             return CreateResponse(bot.Id, FindRecoveryAction(bot, state, planningContext.OccupiedPositions, []));
         }
 
-        planningContext.ReservedItemIds.Add(item.Id);
         planningContext.ReservedTargets.Add((target[0], target[1]));
-        if (!string.IsNullOrEmpty(task.OrderId) && !string.IsNullOrEmpty(item.Type))
+        return ExecuteMoveTask(bot, state, planningContext, target, false, task.Kind);
+    }
+
+    private static BotResponse ExecuteParkTask(
+        Bot bot,
+        GameState state,
+        PlanningContext planningContext,
+        BotTask task,
+        List<int[]> deliveryTargets)
+    {
+        var target = task.Target ?? GetBestParkingTarget(bot, state, deliveryTargets, []);
+        if (target.Length < 2)
         {
-            AddCommittedType(planningContext, task.OrderId, item.Type);
+            return CreateResponse(bot.Id, "wait");
+        }
+
+        if (bot.Position.Length >= 2 && bot.Position[0] == target[0] && bot.Position[1] == target[1])
+        {
+            return CreateResponse(bot.Id, "wait");
         }
 
         return ExecuteMoveTask(bot, state, planningContext, target, false, task.Kind);
     }
 
-    private static BotResponse ExecuteDeliverMoveTask(
+    private static BotResponse ExecuteSupportActiveTask(
         Bot bot,
         GameState state,
         PlanningContext planningContext,
-        int[] deliveryTarget,
-        string role)
+        BotTask task)
     {
-        var route = GetCourierRoute(bot, deliveryTarget, state);
-        var preferredNode = GetNextCourierNode(bot, route);
-        if (preferredNode != null)
+        var active = state.Orders.FirstOrDefault(order => order.Status == "active");
+        if (active != null && bot.Inventory.Count < 3)
         {
-            var preferredTarget = new[] { preferredNode.Value.X, preferredNode.Value.Y };
-            var preferredAction = ToAction((bot.Position[0], bot.Position[1]), preferredNode.Value);
-            if (preferredAction != "wait" &&
-                IsWalkable(preferredTarget, state, planningContext.OccupiedPositions))
+            var needed = GetOutstandingNeeded(active);
+            var adjacentItem = state.Items
+                .Where(item => needed.Contains(item.Type))
+                .Where(item => item.Position.Length >= 2)
+                .Where(item => Math.Abs(bot.Position[0] - item.Position[0]) + Math.Abs(bot.Position[1] - item.Position[1]) == 1)
+                .OrderBy(item => item.Type)
+                .ThenBy(item => item.Id)
+                .FirstOrDefault();
+
+            if (adjacentItem != null)
             {
-                LogMoveDiagnostics(bot, state, preferredTarget, preferredAction, $"{role}:route");
-                return CreateResponse(bot.Id, preferredAction);
+                return CreateResponse(bot.Id, "pick_up", adjacentItem.Id);
             }
         }
 
-        var response = ExecuteMoveTask(bot, state, planningContext, deliveryTarget, true, role);
-        if (response.Actions[0].Action == "wait")
-        {
-            CourierRoutes.Remove(bot.Id);
-        }
-
-        return response;
-    }
-
-    private static BotResponse ExecuteMoveTask(
-        Bot bot,
-        GameState state,
-        PlanningContext planningContext,
-        int[] target,
-        bool prioritizeCourier,
-        string role)
-    {
-        var response = MoveToward(
-            bot,
-            state,
-            target,
-            planningContext.OccupiedPositions,
-            planningContext.ReservedCorridorCells,
-            prioritizeCourier);
-        LogMoveDiagnostics(bot, state, target, response.Actions[0].Action, role);
-        return response;
-    }
-    
-    private static BotResponse MoveTowardNearest(
-        Bot bot,
-        GameState state,
-        List<int[]> targets,
-        HashSet<(int X, int Y)> occupiedPositions)
-    {
-        var target = GetBestTarget(bot.Position, targets, state);
-        return MoveToward(bot, state, target, occupiedPositions);
-    }
-
-    private static async Task<GameState> Receive( CancellationToken ct)
-    {
-        var buffer = new byte[8 * 1024];
-
-        while (!ct.IsCancellationRequested && _socket.State == WebSocketState.Open)
-        {
-            WebSocketReceiveResult result;
-            var payload = new StringBuilder();
-
-            do
-            {
-                result = await _socket.ReceiveAsync(buffer, ct);
-                if (result.MessageType == WebSocketMessageType.Close)
-                {
-                    Console.WriteLine($"Server closed: {result.CloseStatus} {result.CloseStatusDescription}");
-                    return new GameState();
-                }
-
-                payload.Append(Encoding.UTF8.GetString(buffer, 0, result.Count));
-
-            } while (!result.EndOfMessage);
-
-            var payloadText = payload.ToString();
-            var mappedResult = JsonSerializer.Deserialize<GameState>(payloadText, JsonOptions);
-            if (mappedResult != null)
-            {
-                PopulateFallbackFields(mappedResult, payloadText);
-                Console.WriteLine($"Round: {mappedResult.Round}");
-                return mappedResult;
-            }
-        }
-
-        return new GameState();
-    }
-
-    private static BotResponse CreateResponse(int botId, string action, string? itemId = null)
-    {
-        return new BotResponse
-        {
-            Actions =
-            [
-                new Actions
-                {
-                    BotId = botId,
-                    Action = action,
-                    ItemId = itemId
-                }
-            ]
-        };
-    }
-
-    private static void LogMoveDiagnostics(Bot bot, GameState state, int[] target, string action, string role)
-    {
-        if (!DebugLogging)
-        {
-            return;
-        }
-
-        var next = GetNextPosition(bot.Position, action);
-        var roundCache = GetRoundCache(state);
-        var isWall = next.Length >= 2 && roundCache.WallCells.Contains((next[0], next[1]));
-        var isShelf = next.Length >= 2 && roundCache.ShelfCells.Contains((next[0], next[1]));
-        var blockingBot = state.Bots.FirstOrDefault(other =>
-            other.Id != bot.Id &&
-            other.Position.Length >= 2 &&
-            other.Position[0] == next[0] &&
-            other.Position[1] == next[1]);
-
-        Console.WriteLine(
-            $"diag: bot={bot.Id} role={role} current={FormatPoint(bot.Position)} target={FormatPoint(target)} " +
-            $"action={action} next={FormatPoint(next)} wall={isWall} shelf={isShelf} " +
-            $"blocked_by_bot={(blockingBot == null ? "none" : blockingBot.Id)}");
-    }
-
-    private static int[] GetNextPosition(int[] current, string action)
-    {
-        if (current.Length < 2)
-        {
-            return [];
-        }
-
-        return action switch
-        {
-            "move_up" => [current[0], current[1] - 1],
-            "move_down" => [current[0], current[1] + 1],
-            "move_left" => [current[0] - 1, current[1]],
-            "move_right" => [current[0] + 1, current[1]],
-            _ => [current[0], current[1]]
-        };
-    }
-
-    private static string FormatPoint(int[] point)
-    {
-        return point.Length >= 2 ? $"[{point[0]}, {point[1]}]" : "[]";
-    }
-
-    private static int GetHeuristicDistance(int[] start, int[] target)
-    {
-        if (start.Length < 2 || target.Length < 2)
-        {
-            return int.MaxValue;
-        }
-
-        return Math.Abs(start[0] - target[0]) + Math.Abs(start[1] - target[1]);
-    }
-
-    private static List<int[]> GetDeliveryTargets(GameState state)
-    {
-        if (state.Drop_off_zones.Count > 0)
-        {
-            return state.Drop_off_zones.Where(zone => zone.Length >= 2).ToList();
-        }
-
-        if (state.Drop_off.Length >= 2)
-        {
-            return [state.Drop_off];
-        }
-
-        return [];
-    }
-
-    private static bool IsAtAnyTarget(int[] position, IEnumerable<int[]> targets)
-    {
-        if (position.Length < 2)
-        {
-            return false;
-        }
-
-        return targets.Any(target => target.Length >= 2 && position[0] == target[0] && position[1] == target[1]);
-    }
-
-    private static int[] GetBestTarget(int[] start, List<int[]> targets, GameState state)
-    {
-        if (targets.Count == 0)
-        {
-            return [];
-        }
-
-        return targets
-            .OrderBy(target => GetPathDistance(start, target, state))
-            .ThenBy(target => Math.Abs(start[0] - target[0]) + Math.Abs(start[1] - target[1]))
-            .First();
-    }
-
-    private static int[] SelectDeliveryTarget(
-        Bot bot,
-        GameState state,
-        List<int[]> deliveryTargets,
-        List<BotTask> assignedTasks)
-    {
-        if (deliveryTargets.Count <= 1)
-        {
-            var singleTarget = deliveryTargets.FirstOrDefault() ?? [];
-            if (singleTarget.Length >= 2)
-            {
-                CourierTargets[bot.Id] = singleTarget;
-            }
-
-            return singleTarget;
-        }
-
-        if (CourierTargets.TryGetValue(bot.Id, out var existingTarget) &&
-            existingTarget.Length >= 2 &&
-            deliveryTargets.Any(target => target.Length >= 2 && target[0] == existingTarget[0] && target[1] == existingTarget[1]))
-        {
-            return existingTarget;
-        }
-
-        var assignedCounts = assignedTasks
-            .Where(task => task.Kind == "deliver" && task.Target != null && task.Target.Length >= 2)
-            .GroupBy(task => (task.Target![0], task.Target[1]))
-            .ToDictionary(group => group.Key, group => group.Count());
-
-        var selected = deliveryTargets
-            .Where(target => target.Length >= 2)
-            .OrderBy(target => assignedCounts.GetValueOrDefault((target[0], target[1])))
-            .ThenBy(target => GetHeuristicDistance(bot.Position, target))
-            .ThenBy(target => GetPathDistance(bot.Position, target, state))
-            .FirstOrDefault() ?? [];
-
-        if (selected.Length >= 2)
-        {
-            CourierTargets[bot.Id] = selected;
-        }
-
-        return selected;
-    }
-
-    private static int[] GetBestTargetForLogging(int[] start, List<int[]> targets)
-    {
-        if (targets.Count == 0)
-        {
-            return [];
-        }
-
-        return targets
-            .OrderBy(target => Math.Abs(start[0] - target[0]) + Math.Abs(start[1] - target[1]))
-            .First();
-    }
-
-    private static int[] GetBestStageTarget(
-        Bot bot,
-        GameState state,
-        List<int[]> deliveryTargets,
-        List<BotTask> assignedTasks,
-        bool endgame)
-    {
-        var reservedStageTargets = assignedTasks
-            .Where(task => task.Kind == "stage" && task.Target != null && task.Target.Length >= 2)
-            .Select(task => (task.Target![0], task.Target[1]))
-            .ToHashSet();
-
-        var candidates = new List<int[]>();
-        var preferredRows = endgame
-            ? new[] { Math.Max(1, state.Grid.Height / 2), Math.Max(1, state.Grid.Height / 2 - 1), Math.Max(1, state.Grid.Height / 2 + 1) }
-            : new[] { Math.Max(1, state.Grid.Height / 3), Math.Max(1, state.Grid.Height / 2), Math.Max(1, state.Grid.Height / 2 - 2) };
-        foreach (var y in preferredRows)
-        {
-            for (var x = 1; x < state.Grid.Width - 1; x++)
-            {
-                var point = new[] { x, y };
-                if (!IsStageCell(point, state, deliveryTargets) || reservedStageTargets.Contains((x, y)))
-                {
-                    continue;
-                }
-
-                candidates.Add(point);
-            }
-        }
-
-        if (candidates.Count == 0)
-        {
-            return deliveryTargets.FirstOrDefault() ?? [];
-        }
-
-        return candidates
-            .OrderByDescending(candidate => deliveryTargets.Count == 0
-                ? 0
-                : deliveryTargets.Min(target => GetHeuristicDistance(candidate, target)))
-            .ThenBy(candidate => GetHeuristicDistance(bot.Position, candidate))
-            .ThenBy(candidate => candidate[1])
-            .ThenBy(candidate => candidate[0])
-            .First();
-    }
-
-    private static bool IsStageCell(int[] position, GameState state, List<int[]> deliveryTargets)
-    {
-        if (position.Length < 2)
-        {
-            return false;
-        }
-
-        if (position[0] <= 0 || position[0] >= state.Grid.Width - 1 || position[1] <= 0 || position[1] >= state.Grid.Height - 1)
-        {
-            return false;
-        }
-
-        if (deliveryTargets.Any(target => target.Length >= 2 && target[0] == position[0] && target[1] == position[1]))
-        {
-            return false;
-        }
-
-        if (deliveryTargets.Any(target => target.Length >= 2 &&
-            Math.Abs(target[0] - position[0]) + Math.Abs(target[1] - position[1]) <= 3))
-        {
-            return false;
-        }
-
-        return !IsStaticBlocked(position[0], position[1], state);
-    }
-
-    private static int[]? FindAdjacentWalkableTarget(
-        int[] itemPosition,
-        GameState state,
-        HashSet<(int X, int Y)> occupiedPositions,
-        HashSet<(int X, int Y)> reservedTargets,
-        int[] botPosition)
-    {
-        if (itemPosition.Length < 2)
-        {
-            return null;
-        }
-
-        var candidates = new[]
-        {
-            new[] { itemPosition[0], itemPosition[1] - 1 },
-            new[] { itemPosition[0], itemPosition[1] + 1 },
-            new[] { itemPosition[0] - 1, itemPosition[1] },
-            new[] { itemPosition[0] + 1, itemPosition[1] }
-        };
-
-        return candidates
-            .Where(candidate => IsWalkable(candidate, state, occupiedPositions))
-            .Where(candidate => !reservedTargets.Contains((candidate[0], candidate[1])))
-            .OrderBy(candidate => GetHeuristicDistance(botPosition, candidate))
-            .FirstOrDefault();
-    }
-
-    private static bool IsWalkable(int[] position, GameState state, HashSet<(int X, int Y)> occupiedPositions)
-    {
-        if (position.Length < 2)
-        {
-            return false;
-        }
-
-        var x = position[0];
-        var y = position[1];
-
-        if (x < 0 || x >= state.Grid.Width || y < 0 || y >= state.Grid.Height)
-        {
-            return false;
-        }
-
-        if (IsStaticBlocked(x, y, state))
-        {
-            return false;
-        }
-
-        if (occupiedPositions.Contains((x, y)))
-        {
-            return false;
-        }
-
-        return true;
-    }
-
-    private static string FindPathAction(
-        int[] start,
-        int[] target,
-        GameState state,
-        HashSet<(int X, int Y)> occupiedPositions,
-        HashSet<(int X, int Y)> reservedCorridorCells,
-        bool prioritizeCourier)
-    {
-        if (start.Length < 2 || target.Length < 2)
-        {
-            return "wait";
-        }
-
-        if (start[0] == target[0] && start[1] == target[1])
-        {
-            return "wait";
-        }
-
-        var startNode = (X: start[0], Y: start[1]);
-        var targetNode = (X: target[0], Y: target[1]);
-        var queue = new Queue<(int X, int Y)>();
-        var visited = new HashSet<(int X, int Y)> { startNode };
-        var previous = new Dictionary<(int X, int Y), (int X, int Y)>();
-
-        queue.Enqueue(startNode);
-
-        while (queue.Count > 0)
-        {
-            var current = queue.Dequeue();
-            if (current == targetNode)
-            {
-                break;
-            }
-
-            foreach (var neighbor in GetNeighbors(current))
-            {
-                if (visited.Contains(neighbor) || !IsPathNodeWalkable(neighbor, targetNode, state))
-                {
-                    continue;
-                }
-
-                if (occupiedPositions.Contains(neighbor) &&
-                    !(neighbor.X == targetNode.X && neighbor.Y == targetNode.Y))
-                {
-                    continue;
-                }
-
-                if (!prioritizeCourier &&
-                    reservedCorridorCells.Contains(neighbor) &&
-                    !(neighbor.X == targetNode.X && neighbor.Y == targetNode.Y))
-                {
-                    continue;
-                }
-
-                visited.Add(neighbor);
-                previous[neighbor] = current;
-                queue.Enqueue(neighbor);
-            }
-        }
-
-        if (!visited.Contains(targetNode))
-        {
-            return FindBestImmediateStep(start, target, state, occupiedPositions, reservedCorridorCells, prioritizeCourier) ?? "wait";
-        }
-
-        var step = targetNode;
-        while (previous.TryGetValue(step, out var parent) && parent != startNode)
-        {
-            step = parent;
-        }
-
-        var nextAction = ToAction(startNode, step);
-        var nextPosition = GetNextPosition(start, nextAction);
-        if (nextPosition.Length >= 2 && occupiedPositions.Contains((nextPosition[0], nextPosition[1])))
-        {
-            return FindBestImmediateStep(start, target, state, occupiedPositions, reservedCorridorCells, prioritizeCourier) ?? "wait";
-        }
-
-        return nextAction;
-    }
-
-    private static int GetPathDistance(
-        int[] start,
-        int[] target,
-        GameState state)
-    {
-        if (start.Length < 2 || target.Length < 2)
-        {
-            return int.MaxValue;
-        }
-
-        var roundCache = GetRoundCache(state);
-        var key = (start[0], start[1], target[0], target[1]);
-        if (roundCache.DistanceCache.TryGetValue(key, out var cachedDistance))
-        {
-            return cachedDistance;
-        }
-
-        if (roundCache.PathCache.TryGetValue(key, out var cachedPath))
-        {
-            var cachedPathDistance = cachedPath.Count == 0 ? int.MaxValue : cachedPath.Count - 1;
-            roundCache.DistanceCache[key] = cachedPathDistance;
-            return cachedPathDistance;
-        }
-
-        var path = ComputePathNodes(start, target, state);
-        roundCache.PathCache[key] = path;
-        var distance = path.Count == 0 ? int.MaxValue : path.Count - 1;
-        roundCache.DistanceCache[key] = distance;
-        return distance;
-    }
-
-    private static List<(int X, int Y)> GetPathNodes(
-        int[] start,
-        int[] target,
-        GameState state)
-    {
-        if (start.Length < 2 || target.Length < 2)
-        {
-            return [];
-        }
-
-        var roundCache = GetRoundCache(state);
-        var key = (start[0], start[1], target[0], target[1]);
-        if (roundCache.PathCache.TryGetValue(key, out var cachedPath))
-        {
-            return cachedPath;
-        }
-
-        var path = ComputePathNodes(start, target, state);
-        roundCache.PathCache[key] = path;
-        roundCache.DistanceCache[key] = path.Count == 0 ? int.MaxValue : path.Count - 1;
-        return path;
-    }
-
-    private static IEnumerable<(int X, int Y)> GetNeighbors((int X, int Y) point)
-    {
-        yield return (point.X, point.Y - 1);
-        yield return (point.X + 1, point.Y);
-        yield return (point.X, point.Y + 1);
-        yield return (point.X - 1, point.Y);
-    }
-
-    private static bool IsPathNodeWalkable(
-        (int X, int Y) position,
-        (int X, int Y) target,
-        GameState state)
-    {
-        return position.X >= 0 &&
-               position.X < state.Grid.Width &&
-               position.Y >= 0 &&
-               position.Y < state.Grid.Height &&
-               !IsStaticBlocked(position.X, position.Y, state);
-    }
-
-    private static List<(int X, int Y)> ComputePathNodes(
-        int[] start,
-        int[] target,
-        GameState state)
-    {
-        var startNode = (X: start[0], Y: start[1]);
-        var targetNode = (X: target[0], Y: target[1]);
-        var queue = new Queue<(int X, int Y)>();
-        var visited = new HashSet<(int X, int Y)> { startNode };
-        var previous = new Dictionary<(int X, int Y), (int X, int Y)>();
-
-        queue.Enqueue(startNode);
-
-        while (queue.Count > 0)
-        {
-            var current = queue.Dequeue();
-            if (current == targetNode)
-            {
-                break;
-            }
-
-            foreach (var neighbor in GetNeighbors(current))
-            {
-                if (visited.Contains(neighbor) || !IsPathNodeWalkable(neighbor, targetNode, state))
-                {
-                    continue;
-                }
-
-                visited.Add(neighbor);
-                previous[neighbor] = current;
-                queue.Enqueue(neighbor);
-            }
-        }
-
-        if (!visited.Contains(targetNode))
-        {
-            return [];
-        }
-
-        var path = new List<(int X, int Y)>();
-        var step = targetNode;
-        path.Add(step);
-
-        while (previous.TryGetValue(step, out var parent))
-        {
-            path.Add(parent);
-            if (parent == startNode)
-            {
-                break;
-            }
-
-            step = parent;
-        }
-
-        path.Reverse();
-        return path;
-    }
-
-    private static RoundCache GetRoundCache(GameState state)
-    {
-        return CurrentRoundCache ??= CreateRoundCache(state);
-    }
-
-    private static RoundCache CreateRoundCache(GameState state)
-    {
-        var wallCells = state.Grid.Walls
-            .Where(wall => wall.Length >= 2)
-            .Select(wall => (wall[0], wall[1]))
-            .ToHashSet();
-        var shelfCells = state.Items
-            .Where(item => item.Position.Length >= 2)
-            .Select(item => (item.Position[0], item.Position[1]))
-            .ToHashSet();
-
-        return new RoundCache
-        {
-            WallCells = wallCells,
-            ShelfCells = shelfCells
-        };
-    }
-
-    private static bool IsStaticBlocked(int x, int y, GameState state)
-    {
-        var roundCache = GetRoundCache(state);
-        return roundCache.WallCells.Contains((x, y)) || roundCache.ShelfCells.Contains((x, y));
-    }
-
-    private static void UpdateProgressTracking(GameState state)
-    {
-        var activeBotIds = state.Bots.Select(bot => bot.Id).ToHashSet();
-        foreach (var botId in LastActionAttempts.Keys.Where(botId => !activeBotIds.Contains(botId)).ToList())
-        {
-            LastActionAttempts.Remove(botId);
-        }
-
-        foreach (var botId in LastPlannedMoves.Keys.Where(botId => !activeBotIds.Contains(botId)).ToList())
-        {
-            LastPlannedMoves.Remove(botId);
-        }
-
-        foreach (var botId in CourierRoutes.Keys.Where(botId => !activeBotIds.Contains(botId)).ToList())
-        {
-            CourierRoutes.Remove(botId);
-        }
-
-        foreach (var botId in PickupAccessTargets.Keys.Where(botId => !activeBotIds.Contains(botId)).ToList())
-        {
-            PickupAccessTargets.Remove(botId);
-        }
-
-        foreach (var bot in state.Bots.Where(bot => bot.Position.Length >= 2))
-        {
-            var currentPosition = (bot.Position[0], bot.Position[1]);
-            if (LastPositions.TryGetValue(bot.Id, out var lastPosition) && lastPosition == currentPosition)
-            {
-                StuckRounds[bot.Id] = StuckRounds.GetValueOrDefault(bot.Id) + 1;
-            }
-            else
-            {
-                StuckRounds[bot.Id] = 0;
-            }
-
-            LastPositions[bot.Id] = currentPosition;
-        }
-    }
-
-    private static void LogMoveOutcomes(GameState state)
-    {
-        if (!DebugLogging)
-        {
-            return;
-        }
-
-        foreach (var bot in state.Bots.Where(bot => bot.Position.Length >= 2))
-        {
-            if (!LastPlannedMoves.TryGetValue(bot.Id, out var plannedMove))
-            {
-                continue;
-            }
-
-            var actual = (X: bot.Position[0], Y: bot.Position[1]);
-            var matched = actual.X == plannedMove.X && actual.Y == plannedMove.Y;
-            Console.WriteLine(
-                $"result: bot={bot.Id} planned={plannedMove.Action} expected=[{plannedMove.X}, {plannedMove.Y}] actual=[{actual.X}, {actual.Y}] moved={matched}");
-        }
-    }
-
-    private static void LogStateDelta(GameState? previous, GameState current, string? previousPayload)
-    {
-        if (!DebugLogging)
-        {
-            return;
-        }
-
-        if (previous == null || previous.Type != "game_state" || current.Type != "game_state")
-        {
-            return;
-        }
-
-        if (!string.IsNullOrEmpty(previousPayload))
-        {
-            Console.WriteLine($"prev_payload: {previousPayload}");
-        }
-
-        if (current.Score != previous.Score)
-        {
-            Console.WriteLine($"delta: score {previous.Score}->{current.Score}");
-        }
-
-        var previousBots = previous.Bots.ToDictionary(bot => bot.Id);
-        foreach (var bot in current.Bots)
-        {
-            if (!previousBots.TryGetValue(bot.Id, out var previousBot))
-            {
-                continue;
-            }
-
-            var previousInventory = string.Join(",", previousBot.Inventory);
-            var currentInventory = string.Join(",", bot.Inventory);
-            if (!string.Equals(previousInventory, currentInventory, StringComparison.Ordinal))
-            {
-                Console.WriteLine($"delta: bot={bot.Id} inventory [{previousInventory}] -> [{currentInventory}]");
-            }
-
-            if (previousBot.Position.Length >= 2 && bot.Position.Length >= 2 &&
-                (previousBot.Position[0] != bot.Position[0] || previousBot.Position[1] != bot.Position[1]))
-            {
-                Console.WriteLine(
-                    $"delta: bot={bot.Id} position [{previousBot.Position[0]}, {previousBot.Position[1]}] -> [{bot.Position[0]}, {bot.Position[1]}]");
-            }
-        }
-
-        var previousItemIds = previous.Items.Select(item => item.Id).ToHashSet(StringComparer.Ordinal);
-        var currentItemIds = current.Items.Select(item => item.Id).ToHashSet(StringComparer.Ordinal);
-        foreach (var removedItemId in previousItemIds.Except(currentItemIds).OrderBy(id => id))
-        {
-            Console.WriteLine($"delta: item_removed {removedItemId}");
-        }
-
-        var previousOrders = previous.Orders.ToDictionary(order => order.Id);
-        foreach (var order in current.Orders)
-        {
-            if (!previousOrders.TryGetValue(order.Id, out var previousOrder))
-            {
-                continue;
-            }
-
-            var previousDelivered = string.Join(",", previousOrder.Items_delivered);
-            var currentDelivered = string.Join(",", order.Items_delivered);
-            if (!string.Equals(previousDelivered, currentDelivered, StringComparison.Ordinal))
-            {
-                Console.WriteLine($"delta: order={order.Id} delivered [{previousDelivered}] -> [{currentDelivered}]");
-            }
-
-            if (!string.Equals(previousOrder.Status, order.Status, StringComparison.Ordinal) ||
-                previousOrder.Complete != order.Complete)
-            {
-                Console.WriteLine(
-                    $"delta: order={order.Id} status {previousOrder.Status}/{previousOrder.Complete} -> {order.Status}/{order.Complete}");
-            }
-        }
-
-        UpdateActionFeedback(previous, current);
-    }
-
-    private static void UpdateActionFeedback(GameState previous, GameState current)
-    {
-        var previousBots = previous.Bots.ToDictionary(bot => bot.Id);
-        var currentItems = current.Items.Select(item => item.Id).ToHashSet(StringComparer.Ordinal);
-        var previousDeliveredByOrder = previous.Orders.ToDictionary(
-            order => order.Id,
-            order => string.Join(",", order.Items_delivered),
-            StringComparer.Ordinal);
-
-        foreach (var bot in current.Bots)
-        {
-            if (!LastActionAttempts.TryGetValue(bot.Id, out var attempt) ||
-                !previousBots.TryGetValue(bot.Id, out var previousBot))
-            {
-                continue;
-            }
-
-            var inventoryChanged = string.Join(",", previousBot.Inventory) != string.Join(",", bot.Inventory);
-            switch (attempt.Action)
-            {
-                case "drop_off":
-                {
-                    var ordersChanged = current.Orders.Any(order =>
-                        previousDeliveredByOrder.TryGetValue(order.Id, out var previousDelivered) &&
-                        previousDelivered != string.Join(",", order.Items_delivered));
-                    if (!inventoryChanged && !ordersChanged && current.Score == previous.Score)
-                    {
-                        LogDebug($"feedback: bot={bot.Id} drop_off_no_effect");
-                    }
-
-                    break;
-                }
-                case "pick_up":
-                {
-                    var itemRemoved = !string.IsNullOrEmpty(attempt.ItemId) && !currentItems.Contains(attempt.ItemId);
-                    if (!inventoryChanged && !itemRemoved)
-                    {
-                        LogDebug($"feedback: bot={bot.Id} pick_up_no_effect item={attempt.ItemId}");
-                    }
-
-                    break;
-                }
-                default:
-                    break;
-            }
-        }
-    }
-
-    private static void LogDebug(string message)
-    {
-        if (!DebugLogging)
-        {
-            return;
-        }
-
-        Console.WriteLine(message);
+        return ExecuteMoveTask(bot, state, planningContext, task.Target ?? [], false, task.Kind);
     }
 
     private static void CommitBotPlan(Bot bot, GameState state, Actions action, PlanningContext planningContext)
     {
-        foreach (var order in state.Orders.Where(order => order.Status == "active" || order.Status == "preview").Take(2))
-        {
-            var remaining = GetOutstandingNeeded(order, planningContext);
-            foreach (var carried in bot.Inventory)
-            {
-                if (!remaining.Remove(carried))
-                {
-                    continue;
-                }
-
-                AddCommittedType(planningContext, order.Id, carried);
-            }
-        }
-
-        if (action.Action == "pick_up" && !string.IsNullOrEmpty(action.ItemId))
+        if (action.Action == "pick_up")
         {
             PickupAccessTargets.Remove(bot.Id);
-            if (!planningContext.ReservedItemIds.Add(action.ItemId))
-            {
-                return;
-            }
-
-            var pickedItem = state.Items.FirstOrDefault(item => item.Id == action.ItemId);
-            if (pickedItem != null)
-            {
-                foreach (var order in state.Orders.Where(order => order.Status == "active" || order.Status == "preview").Take(2))
-                {
-                    var remaining = GetOutstandingNeeded(order, planningContext);
-                    if (!remaining.Remove(pickedItem.Type))
-                    {
-                        continue;
-                    }
-
-                    AddCommittedType(planningContext, order.Id, pickedItem.Type);
-                    break;
-                }
-            }
-
             return;
         }
 
@@ -1518,306 +652,6 @@ public class GroceryBotClient
             CourierTargets.Remove(bot.Id);
         }
     }
-
-    private static void ReserveDeliveryCorridors(
-        GameState state,
-        List<Bot> planningOrder,
-        Dictionary<int, BotTask> tasksByBotId,
-        PlanningContext planningContext)
-    {
-        foreach (var bot in planningOrder)
-        {
-            if (!tasksByBotId.TryGetValue(bot.Id, out var task) || task.Kind != "deliver")
-            {
-                continue;
-            }
-
-            var target = task.Target ?? [];
-            foreach (var node in GetPathNodes(bot.Position, target, state).Take(6))
-            {
-                planningContext.ReservedCorridorCells.Add(node);
-            }
-        }
-    }
-
-    private static string FindRecoveryAction(
-        Bot bot,
-        GameState state,
-        HashSet<(int X, int Y)> occupiedPositions,
-        int[] preferredTarget)
-    {
-        var stuckRounds = StuckRounds.GetValueOrDefault(bot.Id);
-        if (stuckRounds == 0)
-        {
-            return "wait";
-        }
-
-        var preferredStep = FindBestImmediateStep(bot.Position, preferredTarget, state, occupiedPositions, [], false);
-        if (!string.IsNullOrEmpty(preferredStep))
-        {
-            return preferredStep;
-        }
-
-        if (bot.Position.Length < 2)
-        {
-            return "wait";
-        }
-
-        var current = (X: bot.Position[0], Y: bot.Position[1]);
-        var shuffle = GetNeighbors(current)
-            .Where(neighbor => IsWalkable([neighbor.X, neighbor.Y], state, occupiedPositions))
-            .OrderBy(neighbor => CountAdjacentBots(neighbor, occupiedPositions))
-            .ThenByDescending(neighbor => preferredTarget.Length < 2
-                ? 0
-                : Math.Abs(neighbor.X - preferredTarget[0]) + Math.Abs(neighbor.Y - preferredTarget[1]))
-            .Select(neighbor => ToAction(current, neighbor))
-            .FirstOrDefault();
-
-        return shuffle ?? "wait";
-    }
-
-    private static (string Action, int[] Target)? FindCorridorEscapeAction(
-        Bot bot,
-        GameState state,
-        PlanningContext planningContext)
-    {
-        if (bot.Position.Length < 2)
-        {
-            return null;
-        }
-
-        var current = (X: bot.Position[0], Y: bot.Position[1]);
-        var deliveryTargets = GetDeliveryTargets(state);
-        var onDeliveryTarget = IsAtAnyTarget(bot.Position, deliveryTargets);
-        var currentDeliveryDistance = deliveryTargets.Count == 0
-            ? int.MaxValue
-            : deliveryTargets.Min(target => Math.Abs(current.X - target[0]) + Math.Abs(current.Y - target[1]));
-
-        var safeCandidate = GetNeighbors(current)
-            .Where(neighbor => IsWalkable([neighbor.X, neighbor.Y], state, planningContext.OccupiedPositions))
-            .Where(neighbor => !planningContext.ReservedCorridorCells.Contains(neighbor))
-            .OrderByDescending(neighbor => deliveryTargets.Count == 0
-                ? 0
-                : deliveryTargets.Min(target => Math.Abs(neighbor.X - target[0]) + Math.Abs(neighbor.Y - target[1])))
-            .ThenBy(neighbor => Math.Abs(neighbor.X - current.X) + Math.Abs(neighbor.Y - current.Y))
-            .FirstOrDefault();
-
-        if (safeCandidate != default)
-        {
-            var safeDistance = deliveryTargets.Count == 0
-                ? int.MaxValue
-                : deliveryTargets.Min(target => Math.Abs(safeCandidate.X - target[0]) + Math.Abs(safeCandidate.Y - target[1]));
-
-            if (safeDistance >= currentDeliveryDistance || onDeliveryTarget)
-            {
-                return (ToAction(current, safeCandidate), [safeCandidate.X, safeCandidate.Y]);
-            }
-        }
-
-        if (!onDeliveryTarget)
-        {
-            return null;
-        }
-
-        var emergencyCandidate = GetNeighbors(current)
-            .Where(neighbor => IsWalkable([neighbor.X, neighbor.Y], state, planningContext.OccupiedPositions))
-            .OrderByDescending(neighbor => deliveryTargets.Count == 0
-                ? 0
-                : deliveryTargets.Min(target => Math.Abs(neighbor.X - target[0]) + Math.Abs(neighbor.Y - target[1])))
-            .ThenBy(neighbor => planningContext.ReservedCorridorCells.Contains(neighbor) ? 1 : 0)
-            .FirstOrDefault();
-
-        if (emergencyCandidate == default)
-        {
-            return null;
-        }
-
-        return (ToAction(current, emergencyCandidate), [emergencyCandidate.X, emergencyCandidate.Y]);
-    }
-
-    private static int[]? GetPickupAccessTarget(
-        Bot bot,
-        Item item,
-        GameState state,
-        PlanningContext planningContext)
-    {
-        if (PickupAccessTargets.TryGetValue(bot.Id, out var accessTarget) &&
-            accessTarget.ItemId == item.Id)
-        {
-            var cachedTarget = new[] { accessTarget.X, accessTarget.Y };
-            if (IsAccessiblePickupTarget(bot, cachedTarget, state, planningContext))
-            {
-                return cachedTarget;
-            }
-        }
-
-        var selected = GetAdjacentTargets(item.Position)
-            .Where(candidate => IsAccessiblePickupTarget(bot, candidate, state, planningContext))
-            .OrderBy(candidate => GetHeuristicDistance(bot.Position, candidate))
-            .FirstOrDefault();
-
-        if (selected == null)
-        {
-            PickupAccessTargets.Remove(bot.Id);
-            return null;
-        }
-
-        PickupAccessTargets[bot.Id] = (item.Id, selected[0], selected[1]);
-        return selected;
-    }
-
-    private static bool IsAccessiblePickupTarget(
-        Bot bot,
-        int[] target,
-        GameState state,
-        PlanningContext planningContext)
-    {
-        if (target.Length < 2)
-        {
-            return false;
-        }
-
-        if (bot.Position.Length >= 2 && bot.Position[0] == target[0] && bot.Position[1] == target[1])
-        {
-            return true;
-        }
-
-        if (planningContext.ReservedTargets.Contains((target[0], target[1])))
-        {
-            return false;
-        }
-
-        return IsWalkable(target, state, planningContext.OccupiedPositions);
-    }
-
-    private static IEnumerable<int[]> GetAdjacentTargets(int[] itemPosition)
-    {
-        if (itemPosition.Length < 2)
-        {
-            return [];
-        }
-
-        return
-        [
-            [itemPosition[0], itemPosition[1] - 1],
-            [itemPosition[0] + 1, itemPosition[1]],
-            [itemPosition[0], itemPosition[1] + 1],
-            [itemPosition[0] - 1, itemPosition[1]]
-        ];
-    }
-
-    private static Queue<(int X, int Y)> GetCourierRoute(Bot bot, int[] deliveryTarget, GameState state)
-    {
-        if (CourierRoutes.TryGetValue(bot.Id, out var existingRoute))
-        {
-            var nextNode = existingRoute.Count > 0 ? existingRoute.Peek() : ((int X, int Y)?)null;
-            if (nextNode != null &&
-                (bot.Position[0] == nextNode.Value.X && bot.Position[1] == nextNode.Value.Y))
-            {
-                existingRoute.Dequeue();
-            }
-
-            if (existingRoute.Count > 0)
-            {
-                return existingRoute;
-            }
-        }
-
-        var route = new Queue<(int X, int Y)>(GetPathNodes(bot.Position, deliveryTarget, state).Skip(1));
-        CourierRoutes[bot.Id] = route;
-        return route;
-    }
-
-    private static (int X, int Y)? GetNextCourierNode(Bot bot, Queue<(int X, int Y)> route)
-    {
-        while (route.Count > 0)
-        {
-            var next = route.Peek();
-            if (bot.Position[0] == next.X && bot.Position[1] == next.Y)
-            {
-                route.Dequeue();
-                continue;
-            }
-
-            return next;
-        }
-
-        return null;
-    }
-
-    private static void AdvanceCourierRoute(int botId, int[] nextPosition)
-    {
-        if (nextPosition.Length < 2 || !CourierRoutes.TryGetValue(botId, out var route) || route.Count == 0)
-        {
-            return;
-        }
-
-        var nextNode = route.Peek();
-        if (nextNode.X == nextPosition[0] && nextNode.Y == nextPosition[1])
-        {
-            route.Dequeue();
-        }
-
-        if (route.Count == 0)
-        {
-            CourierRoutes.Remove(botId);
-        }
-    }
-
-    private static string? FindBestImmediateStep(
-        int[] start,
-        int[] target,
-        GameState state,
-        HashSet<(int X, int Y)> occupiedPositions,
-        HashSet<(int X, int Y)> reservedCorridorCells,
-        bool prioritizeCourier)
-    {
-        if (start.Length < 2)
-        {
-            return null;
-        }
-
-        if (target.Length < 2)
-        {
-            return null;
-        }
-
-        var startNode = (X: start[0], Y: start[1]);
-        var currentDistance = GetPathDistance(start, target, state);
-
-        return GetNeighbors(startNode)
-            .Where(neighbor => IsWalkable([neighbor.X, neighbor.Y], state, occupiedPositions))
-            .Where(neighbor => prioritizeCourier || !reservedCorridorCells.Contains(neighbor))
-            .Where(neighbor =>
-            {
-                if (!prioritizeCourier)
-                {
-                    return true;
-                }
-
-                var candidateDistance = GetPathDistance([neighbor.X, neighbor.Y], target, state);
-                return candidateDistance <= currentDistance;
-            })
-            .OrderBy(neighbor => GetPathDistance([neighbor.X, neighbor.Y], target, state))
-            .ThenBy(neighbor => Math.Abs(neighbor.X - target[0]) + Math.Abs(neighbor.Y - target[1]))
-            .Select(neighbor => ToAction(startNode, neighbor))
-            .FirstOrDefault();
-    }
-
-    private static int CountAdjacentBots((int X, int Y) point, HashSet<(int X, int Y)> occupiedPositions)
-    {
-        var count = 0;
-        foreach (var neighbor in GetNeighbors(point))
-        {
-            if (occupiedPositions.Contains(neighbor))
-            {
-                count++;
-            }
-        }
-
-        return count;
-    }
-
 
     private static void PopulateFallbackFields(GameState state, string payloadText)
     {
@@ -1907,21 +741,6 @@ public class GroceryBotClient
         return counts;
     }
 
-    private static List<string> GetOutstandingNeeded(Order order, PlanningContext planningContext)
-    {
-        var outstandingNeeded = GetOutstandingNeeded(order);
-
-        if (planningContext.CommittedTypesByOrderId.TryGetValue(order.Id, out var committed))
-        {
-            foreach (var committedType in committed)
-            {
-                outstandingNeeded.Remove(committedType);
-            }
-        }
-
-        return outstandingNeeded;
-    }
-
     private static int CountMatchingInventory(IEnumerable<string> inventory, Dictionary<string, int> neededCounts)
     {
         var remaining = new Dictionary<string, int>(neededCounts, StringComparer.Ordinal);
@@ -1954,39 +773,64 @@ public class GroceryBotClient
         }
     }
 
-    private static void AddCommittedType(PlanningContext planningContext, string orderId, string itemType)
+    private static PickupCandidate? FindBestPickupCandidate(
+        Bot bot,
+        IEnumerable<Item> items,
+        Dictionary<string, int> demand,
+        GameState state,
+        List<int[]> deliveryTargets,
+        HashSet<string> excludedItemIds,
+        bool activeOrderPickup)
     {
-        if (!planningContext.CommittedTypesByOrderId.TryGetValue(orderId, out var committed))
+        PickupCandidate? best = null;
+
+        foreach (var item in items)
         {
-            committed = [];
-            planningContext.CommittedTypesByOrderId[orderId] = committed;
+            if (excludedItemIds.Contains(item.Id) || demand.GetValueOrDefault(item.Type) <= 0)
+            {
+                continue;
+            }
+
+            var accessTarget = FindAdjacentWalkableTarget(item.Position, state, [], [], bot.Position);
+            if (accessTarget == null)
+            {
+                continue;
+            }
+
+            var pickupDistance = GetPathDistance(bot.Position, accessTarget, state);
+            if (pickupDistance == int.MaxValue)
+            {
+                continue;
+            }
+
+            var deliveryTarget = GetBestTarget(accessTarget, deliveryTargets, state);
+            var deliveryDistance = deliveryTarget.Length >= 2
+                ? GetPathDistance(accessTarget, deliveryTarget, state)
+                : 0;
+            if (deliveryTarget.Length >= 2 && deliveryDistance == int.MaxValue)
+            {
+                continue;
+            }
+
+            var loadBonus = (3 - bot.Inventory.Count) * (activeOrderPickup ? 2 : 1);
+            var carryBonus = activeOrderPickup && bot.Inventory.Count > 0 ? 4 : 0;
+            var score = (pickupDistance * 3) + deliveryDistance - loadBonus - carryBonus;
+
+            if (best != null && score >= best.Score)
+            {
+                continue;
+            }
+
+            best = new PickupCandidate
+            {
+                Item = item,
+                AccessTarget = accessTarget,
+                PickupDistance = pickupDistance,
+                DeliveryDistance = deliveryDistance,
+                Score = score
+            };
         }
 
-        committed.Add(itemType);
-    }
-
-    private static string ToAction((int X, int Y) start, (int X, int Y) next)
-    {
-        if (next.X == start.X && next.Y == start.Y - 1)
-        {
-            return "move_up";
-        }
-
-        if (next.X == start.X + 1 && next.Y == start.Y)
-        {
-            return "move_right";
-        }
-
-        if (next.X == start.X && next.Y == start.Y + 1)
-        {
-            return "move_down";
-        }
-
-        if (next.X == start.X - 1 && next.Y == start.Y)
-        {
-            return "move_left";
-        }
-
-        return "wait";
+        return best;
     }
 }

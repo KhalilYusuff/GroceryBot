@@ -1,0 +1,203 @@
+namespace GroceryBot;
+
+public partial class GroceryBotClient
+{
+    private static void UpdateProgressTracking(GameState state)
+    {
+        if (RecoveryRoundsRemaining > 0)
+        {
+            RecoveryRoundsRemaining--;
+        }
+
+        var activeBotIds = state.Bots.Select(bot => bot.Id).ToHashSet();
+        foreach (var botId in LastActionAttempts.Keys.Where(botId => !activeBotIds.Contains(botId)).ToList())
+        {
+            LastActionAttempts.Remove(botId);
+        }
+
+        foreach (var botId in LastPlannedMoves.Keys.Where(botId => !activeBotIds.Contains(botId)).ToList())
+        {
+            LastPlannedMoves.Remove(botId);
+        }
+
+        foreach (var botId in CourierRoutes.Keys.Where(botId => !activeBotIds.Contains(botId)).ToList())
+        {
+            CourierRoutes.Remove(botId);
+        }
+
+        foreach (var botId in PickupAccessTargets.Keys.Where(botId => !activeBotIds.Contains(botId)).ToList())
+        {
+            PickupAccessTargets.Remove(botId);
+        }
+
+        foreach (var bot in state.Bots.Where(bot => bot.Position.Length >= 2))
+        {
+            var currentPosition = (bot.Position[0], bot.Position[1]);
+            if (LastPositions.TryGetValue(bot.Id, out var lastPosition) && lastPosition == currentPosition)
+            {
+                StuckRounds[bot.Id] = StuckRounds.GetValueOrDefault(bot.Id) + 1;
+            }
+            else
+            {
+                StuckRounds[bot.Id] = 0;
+            }
+
+            LastPositions[bot.Id] = currentPosition;
+        }
+    }
+
+    private static void LogMoveOutcomes(GameState state)
+    {
+        if (!DebugLogging)
+        {
+            return;
+        }
+
+        foreach (var bot in state.Bots.Where(bot => bot.Position.Length >= 2))
+        {
+            if (!LastPlannedMoves.TryGetValue(bot.Id, out var plannedMove))
+            {
+                continue;
+            }
+
+            var actual = (X: bot.Position[0], Y: bot.Position[1]);
+            var matched = actual.X == plannedMove.X && actual.Y == plannedMove.Y;
+            Console.WriteLine(
+                $"result: bot={bot.Id} planned={plannedMove.Action} expected=[{plannedMove.X}, {plannedMove.Y}] actual=[{actual.X}, {actual.Y}] moved={matched}");
+        }
+    }
+
+    private static void LogStateDelta(GameState? previous, GameState current, string? previousPayload)
+    {
+        if (!DebugLogging)
+        {
+            return;
+        }
+
+        if (previous == null || previous.Type != "game_state" || current.Type != "game_state")
+        {
+            return;
+        }
+
+        if (!string.IsNullOrEmpty(previousPayload))
+        {
+            Console.WriteLine($"prev_payload: {previousPayload}");
+        }
+
+        if (current.Score != previous.Score)
+        {
+            Console.WriteLine($"delta: score {previous.Score}->{current.Score}");
+        }
+
+        var previousBots = previous.Bots.ToDictionary(bot => bot.Id);
+        foreach (var bot in current.Bots)
+        {
+            if (!previousBots.TryGetValue(bot.Id, out var previousBot))
+            {
+                continue;
+            }
+
+            var previousInventory = string.Join(",", previousBot.Inventory);
+            var currentInventory = string.Join(",", bot.Inventory);
+            if (!string.Equals(previousInventory, currentInventory, StringComparison.Ordinal))
+            {
+                Console.WriteLine($"delta: bot={bot.Id} inventory [{previousInventory}] -> [{currentInventory}]");
+            }
+
+            if (previousBot.Position.Length >= 2 && bot.Position.Length >= 2 &&
+                (previousBot.Position[0] != bot.Position[0] || previousBot.Position[1] != bot.Position[1]))
+            {
+                Console.WriteLine(
+                    $"delta: bot={bot.Id} position [{previousBot.Position[0]}, {previousBot.Position[1]}] -> [{bot.Position[0]}, {bot.Position[1]}]");
+            }
+        }
+
+        var previousItemIds = previous.Items.Select(item => item.Id).ToHashSet(StringComparer.Ordinal);
+        var currentItemIds = current.Items.Select(item => item.Id).ToHashSet(StringComparer.Ordinal);
+        foreach (var removedItemId in previousItemIds.Except(currentItemIds).OrderBy(id => id))
+        {
+            Console.WriteLine($"delta: item_removed {removedItemId}");
+        }
+
+        var previousOrders = previous.Orders.ToDictionary(order => order.Id);
+        foreach (var order in current.Orders)
+        {
+            if (!previousOrders.TryGetValue(order.Id, out var previousOrder))
+            {
+                continue;
+            }
+
+            var previousDelivered = string.Join(",", previousOrder.Items_delivered);
+            var currentDelivered = string.Join(",", order.Items_delivered);
+            if (!string.Equals(previousDelivered, currentDelivered, StringComparison.Ordinal))
+            {
+                Console.WriteLine($"delta: order={order.Id} delivered [{previousDelivered}] -> [{currentDelivered}]");
+            }
+
+            if (!string.Equals(previousOrder.Status, order.Status, StringComparison.Ordinal) ||
+                previousOrder.Complete != order.Complete)
+            {
+                Console.WriteLine(
+                    $"delta: order={order.Id} status {previousOrder.Status}/{previousOrder.Complete} -> {order.Status}/{order.Complete}");
+            }
+        }
+
+        UpdateActionFeedback(previous, current);
+    }
+
+    private static void UpdateActionFeedback(GameState previous, GameState current)
+    {
+        var previousBots = previous.Bots.ToDictionary(bot => bot.Id);
+        var currentItems = current.Items.Select(item => item.Id).ToHashSet(StringComparer.Ordinal);
+        var previousDeliveredByOrder = previous.Orders.ToDictionary(
+            order => order.Id,
+            order => string.Join(",", order.Items_delivered),
+            StringComparer.Ordinal);
+
+        foreach (var bot in current.Bots)
+        {
+            if (!LastActionAttempts.TryGetValue(bot.Id, out var attempt) ||
+                !previousBots.TryGetValue(bot.Id, out var previousBot))
+            {
+                continue;
+            }
+
+            var inventoryChanged = string.Join(",", previousBot.Inventory) != string.Join(",", bot.Inventory);
+            switch (attempt.Action)
+            {
+                case "drop_off":
+                {
+                    var ordersChanged = current.Orders.Any(order =>
+                        previousDeliveredByOrder.TryGetValue(order.Id, out var previousDelivered) &&
+                        previousDelivered != string.Join(",", order.Items_delivered));
+                    if (!inventoryChanged && !ordersChanged && current.Score == previous.Score)
+                    {
+                        LogDebug($"feedback: bot={bot.Id} drop_off_no_effect");
+                    }
+
+                    break;
+                }
+                case "pick_up":
+                {
+                    var itemRemoved = !string.IsNullOrEmpty(attempt.ItemId) && !currentItems.Contains(attempt.ItemId);
+                    if (!inventoryChanged && !itemRemoved)
+                    {
+                        LogDebug($"feedback: bot={bot.Id} pick_up_no_effect item={attempt.ItemId}");
+                    }
+
+                    break;
+                }
+            }
+        }
+    }
+
+    private static void LogDebug(string message)
+    {
+        if (!DebugLogging)
+        {
+            return;
+        }
+
+        Console.WriteLine(message);
+    }
+}
