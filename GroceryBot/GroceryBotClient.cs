@@ -148,6 +148,7 @@ public partial class GroceryBotClient
 
         var activeDemand = GetOutstandingCounts(active);
         var previewDemand = preview == null ? new Dictionary<string, int>() : GetOutstandingCounts(preview);
+        var initialActiveOutstanding = activeDemand.Values.Where(count => count > 0).Sum();
         var previewPickupCap = teamSize >= 8 && preview != null
             ? previewDemand.Values.Where(count => count > 0).Sum()
             : 0;
@@ -219,6 +220,15 @@ public partial class GroceryBotClient
                 continue;
             }
 
+            // Small teams cannot afford to park partially loaded bots while active demand remains.
+            // Keep them available for active pickups until they are full or the active order is covered.
+            if (smallTeam &&
+                bot.Inventory.Count < 3 &&
+                activeDemand.Values.Any(count => count > 0))
+            {
+                continue;
+            }
+
             tasksByBotId[bot.Id] = new BotTask
             {
                 Kind = largeTeam ? "park" : "stage",
@@ -236,7 +246,7 @@ public partial class GroceryBotClient
             availableBots.RemoveAll(bot => bot.Id == pair.Key);
         }
 
-        if (largeTeam && availableBots.Count > 0 && activeDemand.Values.Any(count => count > 0))
+        if (availableBots.Count > 0 && activeDemand.Values.Any(count => count > 0))
         {
             var supportAssignments = AssignActiveSupportTasks(
                 availableBots,
@@ -244,7 +254,7 @@ public partial class GroceryBotClient
                 activeDemand,
                 deliveryTargets,
                 tasksByBotId.Values.ToList(),
-                Math.Min(3, availableBots.Count));
+                smallTeam ? availableBots.Count : Math.Min(3, availableBots.Count));
             foreach (var pair in supportAssignments)
             {
                 tasksByBotId[pair.Key] = pair.Value;
@@ -253,7 +263,16 @@ public partial class GroceryBotClient
         }
 
         var activeCovered = activeDemand.Values.All(count => count <= 0);
-        if (!smallTeam && !recoveryMode && preview != null && previewPickupCap > 0)
+        var currentActiveOutstanding = activeDemand.Values.Where(count => count > 0).Sum();
+        var allowPreviewWork = !recoveryMode &&
+                               preview != null &&
+                               previewPickupCap > 0 &&
+                               (!smallTeam
+                                   ? activeCovered
+                                   : activeCovered &&
+                                     initialActiveOutstanding <= 2 &&
+                                     currentActiveOutstanding == 0);
+        if (allowPreviewWork && preview != null)
         {
             var parallelPreviewCap = activeCovered
                 ? previewPickupCap
@@ -269,12 +288,25 @@ public partial class GroceryBotClient
         var assignedTasks = tasksByBotId.Values.ToList();
         foreach (var bot in availableBots)
         {
+            var dynamicActiveOutstanding = activeDemand.Values.Where(count => count > 0).Sum();
+            var supportTarget = dynamicActiveOutstanding > 0
+                ? GetBestActiveSupportTarget(bot, state, activeDemand, deliveryTargets, assignedTasks
+                    .Where(task => task.Target != null && task.Target.Length >= 2)
+                    .Select(task => (task.Target![0], task.Target[1]))
+                    .ToHashSet())
+                : null;
             tasksByBotId[bot.Id] = new BotTask
             {
-                Kind = largeTeam ? "park" : "stage",
-                Target = largeTeam
-                    ? GetBestParkingTarget(bot, state, deliveryTargets, assignedTasks)
-                    : GetBestStageTarget(bot, state, deliveryTargets, assignedTasks, endgame)
+                Kind = dynamicActiveOutstanding > 0 && supportTarget != null
+                    ? "support_active"
+                    : largeTeam
+                        ? "park"
+                        : "stage",
+                Target = dynamicActiveOutstanding > 0 && supportTarget != null
+                    ? supportTarget
+                    : largeTeam
+                        ? GetBestParkingTarget(bot, state, deliveryTargets, assignedTasks)
+                        : GetBestStageTarget(bot, state, deliveryTargets, assignedTasks, endgame)
             };
             assignedTasks.Add(tasksByBotId[bot.Id]);
         }
@@ -294,8 +326,12 @@ public partial class GroceryBotClient
         var recoveryMode = RecoveryRoundsRemaining > 0;
         var activeDemand = GetOutstandingCounts(active);
         var previewDemand = preview == null ? new Dictionary<string, int>() : GetOutstandingCounts(preview);
+        var initialActiveOutstanding = activeDemand.Values.Where(count => count > 0).Sum();
+        var finishMode = initialActiveOutstanding <= 2;
         var rolesByBotId = BuildRoleAssignments(state, planningOrder, active, preview, activeDemand, previewDemand, deliveryTargets, endgame, recoveryMode);
+        var focusTypesByBotId = BuildActiveFocusAssignments(state, planningOrder, rolesByBotId, activeDemand);
         var availableBots = new List<Bot>(planningOrder);
+        var activeInventoryFlushesAssigned = 0;
 
         foreach (var bot in planningOrder)
         {
@@ -305,7 +341,13 @@ public partial class GroceryBotClient
             }
 
             var role = rolesByBotId.GetValueOrDefault(bot.Id, "reserve");
+            var currentActiveOutstanding = activeDemand.Values.Where(count => count > 0).Sum();
             var activeMatches = CountMatchingInventory(bot.Inventory, activeDemand);
+            var previewMatches = CountMatchingInventory(bot.Inventory, previewDemand);
+            var hasCapacityForActivePickup = bot.Inventory.Count < 3;
+            var shouldFlushInventory = bot.Inventory.Count >= 3 ||
+                                       StuckRounds.GetValueOrDefault(bot.Id) >= 3 ||
+                                       (previewMatches > 0 && !hasCapacityForActivePickup);
             if (activeMatches > 0)
             {
                 if (role == "active_picker")
@@ -315,7 +357,8 @@ public partial class GroceryBotClient
                         state,
                         activeDemand,
                         active.Id,
-                        deliveryTargets);
+                        deliveryTargets,
+                        focusTypesByBotId.GetValueOrDefault(bot.Id));
                     if (continuePickupTask != null)
                     {
                         tasksByBotId[bot.Id] = continuePickupTask;
@@ -338,11 +381,73 @@ public partial class GroceryBotClient
 
             if (role == "courier")
             {
+                if (finishMode && currentActiveOutstanding > 0 && activeMatches <= 0)
+                {
+                    if (hasCapacityForActivePickup)
+                    {
+                        continue;
+                    }
+
+                    tasksByBotId[bot.Id] = new BotTask
+                    {
+                        Kind = "park",
+                        Target = GetBestParkingTarget(bot, state, deliveryTargets, tasksByBotId.Values.ToList())
+                    };
+                    availableBots.Remove(bot);
+                    continue;
+                }
+
+                var allowCourierFlush = currentActiveOutstanding <= 0 ||
+                                        bot.Inventory.Count >= 3 ||
+                                        StuckRounds.GetValueOrDefault(bot.Id) >= 3 ||
+                                        (!finishMode && activeInventoryFlushesAssigned < 2);
+                if (currentActiveOutstanding > 0 && !allowCourierFlush)
+                {
+                    continue;
+                }
+
                 tasksByBotId[bot.Id] = new BotTask
                 {
                     Kind = "deliver",
                     Target = SelectDeliveryTarget(bot, state, deliveryTargets, tasksByBotId.Values.ToList())
                 };
+                if (currentActiveOutstanding > 0)
+                {
+                    activeInventoryFlushesAssigned++;
+                }
+                availableBots.Remove(bot);
+                continue;
+            }
+
+            if (currentActiveOutstanding > 0 && hasCapacityForActivePickup)
+            {
+                continue;
+            }
+
+            if (finishMode && currentActiveOutstanding > 0 && activeMatches <= 0)
+            {
+                tasksByBotId[bot.Id] = new BotTask
+                {
+                    Kind = role == "reserve" ? "park" : "stage",
+                    Target = role == "reserve"
+                        ? GetBestParkingTarget(bot, state, deliveryTargets, tasksByBotId.Values.ToList())
+                        : GetBestStageTarget(bot, state, deliveryTargets, tasksByBotId.Values.ToList(), endgame)
+                };
+                availableBots.Remove(bot);
+                continue;
+            }
+
+            if (shouldFlushInventory)
+            {
+                tasksByBotId[bot.Id] = new BotTask
+                {
+                    Kind = "deliver",
+                    Target = SelectDeliveryTarget(bot, state, deliveryTargets, tasksByBotId.Values.ToList())
+                };
+                if (currentActiveOutstanding > 0)
+                {
+                    activeInventoryFlushesAssigned++;
+                }
                 availableBots.Remove(bot);
                 continue;
             }
@@ -363,7 +468,17 @@ public partial class GroceryBotClient
         var activePickers = availableBots
             .Where(bot => rolesByBotId.GetValueOrDefault(bot.Id, "reserve") == "active_picker")
             .ToList();
-        var activeAssignments = AssignPickupTasks(activePickers, state, active, activeDemand, deliveryTargets, "pickup_active");
+        var focusedActiveAssignments = AssignFocusedPickupTasks(activePickers, state, active, activeDemand, deliveryTargets, focusTypesByBotId);
+        foreach (var pair in focusedActiveAssignments)
+        {
+            tasksByBotId[pair.Key] = pair.Value;
+            availableBots.RemoveAll(bot => bot.Id == pair.Key);
+        }
+
+        activePickers = availableBots
+            .Where(bot => rolesByBotId.GetValueOrDefault(bot.Id, "reserve") == "active_picker")
+            .ToList();
+        var activeAssignments = AssignPickupTasks(activePickers, state, active, activeDemand, deliveryTargets, "pickup_active", int.MaxValue, focusTypesByBotId);
         foreach (var pair in activeAssignments)
         {
             tasksByBotId[pair.Key] = pair.Value;
@@ -371,10 +486,107 @@ public partial class GroceryBotClient
         }
 
         var activeOutstanding = activeDemand.Values.Where(count => count > 0).Sum();
+        if (finishMode && activeOutstanding > 0)
+        {
+            var finishBots = availableBots
+                .Where(bot => bot.Inventory.Count < 3)
+                .OrderBy(bot => rolesByBotId.GetValueOrDefault(bot.Id, "reserve") == "active_picker" ? 0 : 1)
+                .ThenBy(bot => rolesByBotId.GetValueOrDefault(bot.Id, "reserve") == "buffer" ? 0 : 1)
+                .ThenBy(bot => bot.Id)
+                .ToList();
+            var finishAssignments = AssignPickupTasks(
+                finishBots,
+                state,
+                active,
+                activeDemand,
+                deliveryTargets,
+                "pickup_active",
+                finishBots.Count,
+                focusTypesByBotId);
+            foreach (var pair in finishAssignments)
+            {
+                tasksByBotId[pair.Key] = pair.Value;
+                availableBots.RemoveAll(bot => bot.Id == pair.Key);
+            }
+
+            // In finish mode, one assigned picker can get trapped behind congestion.
+            // Add redundant same-type claims for the final 1-2 active items.
+            var remainingFinishDemand = GetOutstandingCounts(active);
+            foreach (var task in tasksByBotId.Values.Where(task => task.Kind == "pickup_active" && !string.IsNullOrEmpty(task.ItemType)))
+            {
+                remainingFinishDemand[task.ItemType!] = Math.Max(0, remainingFinishDemand.GetValueOrDefault(task.ItemType!) - 1);
+            }
+
+            var unresolvedFinishTypes = remainingFinishDemand
+                .Where(pair => pair.Value > 0)
+                .Select(pair => pair.Key)
+                .ToHashSet(StringComparer.Ordinal);
+            if (unresolvedFinishTypes.Count > 0)
+            {
+                var redundantBots = availableBots
+                    .Where(bot => bot.Inventory.Count < 3)
+                    .OrderBy(bot => StuckRounds.GetValueOrDefault(bot.Id))
+                    .ThenBy(bot => bot.Id)
+                    .ToList();
+                var redundantAssignments = AssignRedundantFinishPickupTasks(
+                    redundantBots,
+                    state,
+                    active,
+                    deliveryTargets,
+                    unresolvedFinishTypes,
+                    tasksByBotId.Values.ToList(),
+                    focusTypesByBotId);
+                foreach (var pair in redundantAssignments)
+                {
+                    tasksByBotId[pair.Key] = pair.Value;
+                    availableBots.RemoveAll(bot => bot.Id == pair.Key);
+                }
+            }
+        }
+
+        activeOutstanding = activeDemand.Values.Where(count => count > 0).Sum();
+        var bufferPickers = availableBots
+            .Where(bot => rolesByBotId.GetValueOrDefault(bot.Id, "reserve") == "buffer")
+            .ToList();
+        if (!finishMode && bufferPickers.Count > 0 && activeOutstanding > 0)
+        {
+            var bufferPickupAssignments = AssignFocusedPickupTasks(bufferPickers, state, active, activeDemand, deliveryTargets, focusTypesByBotId);
+            foreach (var pair in bufferPickupAssignments)
+            {
+                tasksByBotId[pair.Key] = pair.Value;
+                availableBots.RemoveAll(bot => bot.Id == pair.Key);
+            }
+        }
+
+        activeOutstanding = activeDemand.Values.Where(count => count > 0).Sum();
+        var extraPickers = availableBots
+            .Where(bot =>
+                rolesByBotId.GetValueOrDefault(bot.Id, "reserve") != "reserve" &&
+                bot.Inventory.Count < 3)
+            .ToList();
+        if (!finishMode && extraPickers.Count > 0 && activeOutstanding > 0)
+        {
+            var extraPickupAssignments = AssignPickupTasks(
+                extraPickers,
+                state,
+                active,
+                activeDemand,
+                deliveryTargets,
+                "pickup_active",
+                Math.Min(Math.Max(2, activeOutstanding), extraPickers.Count),
+                focusTypesByBotId);
+            foreach (var pair in extraPickupAssignments)
+            {
+                tasksByBotId[pair.Key] = pair.Value;
+                availableBots.RemoveAll(bot => bot.Id == pair.Key);
+            }
+        }
+
+        activeOutstanding = activeDemand.Values.Where(count => count > 0).Sum();
         var buffers = availableBots
             .Where(bot => rolesByBotId.GetValueOrDefault(bot.Id, "reserve") == "buffer")
             .ToList();
-        if (buffers.Count > 0 && activeOutstanding > 0)
+        if (!finishMode && buffers.Count > 0 && activeOutstanding > 0)
         {
             var bufferAssignments = AssignActiveSupportTasks(
                 buffers,
@@ -382,7 +594,8 @@ public partial class GroceryBotClient
                 activeDemand,
                 deliveryTargets,
                 tasksByBotId.Values.ToList(),
-                buffers.Count);
+                buffers.Count,
+                focusTypesByBotId);
             foreach (var pair in bufferAssignments)
             {
                 tasksByBotId[pair.Key] = pair.Value;
@@ -391,7 +604,7 @@ public partial class GroceryBotClient
         }
 
         activeOutstanding = activeDemand.Values.Where(count => count > 0).Sum();
-        if (availableBots.Count > 0 && activeOutstanding > 0)
+        if (!finishMode && availableBots.Count > 0 && activeOutstanding > 0)
         {
             var extraSupportBots = availableBots
                 .Where(bot => rolesByBotId.GetValueOrDefault(bot.Id, "reserve") != "reserve")
@@ -402,7 +615,8 @@ public partial class GroceryBotClient
                 activeDemand,
                 deliveryTargets,
                 tasksByBotId.Values.ToList(),
-                extraSupportBots.Count);
+                extraSupportBots.Count,
+                focusTypesByBotId);
             foreach (var pair in extraSupportAssignments)
             {
                 tasksByBotId[pair.Key] = pair.Value;
@@ -411,7 +625,7 @@ public partial class GroceryBotClient
         }
 
         activeOutstanding = activeDemand.Values.Where(count => count > 0).Sum();
-        if (availableBots.Count > 0 && activeOutstanding > 0)
+        if (!finishMode && availableBots.Count > 0 && activeOutstanding > 0)
         {
             var idleCouriers = availableBots
                 .Where(bot => rolesByBotId.GetValueOrDefault(bot.Id, "reserve") == "courier")
@@ -422,7 +636,8 @@ public partial class GroceryBotClient
                 activeDemand,
                 deliveryTargets,
                 tasksByBotId.Values.ToList(),
-                Math.Min(2, idleCouriers.Count));
+                Math.Min(2, idleCouriers.Count),
+                focusTypesByBotId);
             foreach (var pair in courierSupportAssignments)
             {
                 tasksByBotId[pair.Key] = pair.Value;
@@ -435,6 +650,20 @@ public partial class GroceryBotClient
         {
             var role = rolesByBotId.GetValueOrDefault(bot.Id, "reserve");
             var dynamicActiveOutstanding = activeDemand.Values.Where(count => count > 0).Sum();
+            var reservedTargets = assignedTasks
+                .Where(task => task.Target != null && task.Target.Length >= 2)
+                .Select(task => (task.Target![0], task.Target[1]))
+                .ToHashSet();
+            var fallbackPickupTask = dynamicActiveOutstanding > 0 && bot.Inventory.Count < 3
+                ? BuildFallbackActivePickupTask(
+                    bot,
+                    state,
+                    active,
+                    activeDemand,
+                    deliveryTargets,
+                    focusTypesByBotId.GetValueOrDefault(bot.Id),
+                    reservedTargets)
+                : null;
             tasksByBotId[bot.Id] = role switch
             {
                 "courier" => new BotTask
@@ -444,39 +673,53 @@ public partial class GroceryBotClient
                 },
                 "buffer" => new BotTask
                 {
-                    Kind = "support_active",
-                    Target = GetBestActiveSupportTarget(bot, state, activeDemand, deliveryTargets, assignedTasks
-                        .Where(task => task.Target != null && task.Target.Length >= 2)
-                        .Select(task => (task.Target![0], task.Target[1]))
-                        .ToHashSet()) ?? GetBestStageTarget(bot, state, deliveryTargets, assignedTasks, endgame)
+                    Kind = fallbackPickupTask?.Kind ?? "support_active",
+                    OrderId = fallbackPickupTask?.OrderId,
+                    ItemId = fallbackPickupTask?.ItemId,
+                    ItemType = fallbackPickupTask?.ItemType,
+                    Target = fallbackPickupTask?.Target ?? GetBestActiveSupportTarget(
+                        bot,
+                        state,
+                        activeDemand,
+                        deliveryTargets,
+                        reservedTargets,
+                        focusTypesByBotId.GetValueOrDefault(bot.Id)) ?? GetBestStageTarget(bot, state, deliveryTargets, assignedTasks, endgame)
                 },
                 "preview_picker" when preview != null => new BotTask
                 {
-                    Kind = "support_active",
-                    Target = GetBestActiveSupportTarget(bot, state, activeDemand, deliveryTargets, assignedTasks
-                        .Where(task => task.Target != null && task.Target.Length >= 2)
-                        .Select(task => (task.Target![0], task.Target[1]))
-                        .ToHashSet()) ?? GetBestStageTarget(bot, state, deliveryTargets, assignedTasks, endgame)
+                    Kind = fallbackPickupTask?.Kind ?? "support_active",
+                    OrderId = fallbackPickupTask?.OrderId,
+                    ItemId = fallbackPickupTask?.ItemId,
+                    ItemType = fallbackPickupTask?.ItemType,
+                    Target = fallbackPickupTask?.Target ?? GetBestActiveSupportTarget(
+                        bot,
+                        state,
+                        activeDemand,
+                        deliveryTargets,
+                        reservedTargets,
+                        focusTypesByBotId.GetValueOrDefault(bot.Id)) ?? GetBestStageTarget(bot, state, deliveryTargets, assignedTasks, endgame)
                 },
                 "active_picker" => new BotTask
                 {
-                    Kind = dynamicActiveOutstanding > 0 ? "support_active" : "stage",
-                    Target = dynamicActiveOutstanding > 0
-                        ? GetBestActiveSupportTarget(bot, state, activeDemand, deliveryTargets, assignedTasks
-                            .Where(task => task.Target != null && task.Target.Length >= 2)
-                            .Select(task => (task.Target![0], task.Target[1]))
-                            .ToHashSet()) ?? GetBestStageTarget(bot, state, deliveryTargets, assignedTasks, endgame)
+                    Kind = fallbackPickupTask?.Kind ?? (dynamicActiveOutstanding > 0 ? "support_active" : "stage"),
+                    OrderId = fallbackPickupTask?.OrderId,
+                    ItemId = fallbackPickupTask?.ItemId,
+                    ItemType = fallbackPickupTask?.ItemType,
+                    Target = fallbackPickupTask?.Target ?? (dynamicActiveOutstanding > 0
+                        ? GetBestActiveSupportTarget(bot, state, activeDemand, deliveryTargets, reservedTargets, focusTypesByBotId.GetValueOrDefault(bot.Id)) ?? GetBestStageTarget(bot, state, deliveryTargets, assignedTasks, endgame)
                         : GetBestStageTarget(bot, state, deliveryTargets, assignedTasks, endgame)
+                    )
                 },
                 _ => new BotTask
                 {
-                    Kind = dynamicActiveOutstanding > 0 ? "support_active" : "park",
-                    Target = dynamicActiveOutstanding > 0
-                        ? GetBestActiveSupportTarget(bot, state, activeDemand, deliveryTargets, assignedTasks
-                            .Where(task => task.Target != null && task.Target.Length >= 2)
-                            .Select(task => (task.Target![0], task.Target[1]))
-                            .ToHashSet()) ?? GetBestStageTarget(bot, state, deliveryTargets, assignedTasks, endgame)
+                    Kind = fallbackPickupTask?.Kind ?? (dynamicActiveOutstanding > 0 ? "support_active" : "park"),
+                    OrderId = fallbackPickupTask?.OrderId,
+                    ItemId = fallbackPickupTask?.ItemId,
+                    ItemType = fallbackPickupTask?.ItemType,
+                    Target = fallbackPickupTask?.Target ?? (dynamicActiveOutstanding > 0
+                        ? GetBestActiveSupportTarget(bot, state, activeDemand, deliveryTargets, reservedTargets, focusTypesByBotId.GetValueOrDefault(bot.Id)) ?? GetBestStageTarget(bot, state, deliveryTargets, assignedTasks, endgame)
                         : GetBestParkingTarget(bot, state, deliveryTargets, assignedTasks)
+                    )
                 }
             };
             assignedTasks.Add(tasksByBotId[bot.Id]);
@@ -507,9 +750,15 @@ public partial class GroceryBotClient
         var activeOutstanding = activeDemand.Values.Where(count => count > 0).Sum();
         var carryingActive = planningOrder.Count(bot => CountMatchingInventory(bot.Inventory, activeDemand) > 0);
         var hasPreview = false;
+        var baseCourierCap = teamSize >= 18
+            ? 3
+            : 2;
+        var adaptiveCourierCap = carryingActive >= Math.Max(4, teamSize / 4)
+            ? baseCourierCap + 1
+            : baseCourierCap;
         var caps = new Dictionary<string, int>
         {
-            ["courier"] = Math.Clamp(Math.Max((teamSize + 4) / 5, carryingActive / 2), 3, 8),
+            ["courier"] = Math.Clamp(adaptiveCourierCap + (activeOutstanding <= 2 ? 1 : 0), 2, 5),
             ["active_picker"] = Math.Clamp(Math.Max(6, teamSize / 2 - 1 + (activeOutstanding >= 6 ? 1 : 0)), 6, 10),
             ["preview_picker"] = 0,
             ["buffer"] = Math.Clamp(teamSize / 7, 2, 3)
@@ -517,7 +766,7 @@ public partial class GroceryBotClient
         if (endgame)
         {
             caps["preview_picker"] = 0;
-            caps["courier"] = Math.Clamp(caps["courier"] + 1, 4, 9);
+            caps["courier"] = Math.Clamp(caps["courier"] + 1, 3, 6);
         }
 
         while (caps.Values.Sum() > teamSize)
@@ -573,7 +822,8 @@ public partial class GroceryBotClient
             RoleAssignments[bot.Id] = new RoleAssignment
             {
                 Role = role,
-                LockedUntilRound = lockUntil
+                LockedUntilRound = lockUntil,
+                FocusItemType = existing?.FocusItemType
             };
             return true;
         }
@@ -692,6 +942,244 @@ public partial class GroceryBotClient
         return rolesByBotId;
     }
 
+    private static BotTask? BuildFallbackActivePickupTask(
+        Bot bot,
+        GameState state,
+        Order active,
+        Dictionary<string, int> activeDemand,
+        List<int[]> deliveryTargets,
+        string? preferredItemType,
+        HashSet<(int X, int Y)> reservedTargets)
+    {
+        RecentFallbackPickupAttempts++;
+        var candidate = FindBestPickupCandidate(
+            bot,
+            state.Items,
+            activeDemand,
+            state,
+            deliveryTargets,
+            [],
+            true,
+            preferredItemType,
+            reservedTargets);
+        if (candidate == null)
+        {
+            RecentFallbackPickupNoCandidate++;
+            if (RecentFallbackPickupNoCandidate <= 6)
+            {
+                var outstandingTypes = string.Join(
+                    ",",
+                    activeDemand.Where(pair => pair.Value > 0)
+                        .OrderByDescending(pair => pair.Value)
+                        .ThenBy(pair => pair.Key, StringComparer.Ordinal)
+                        .Select(pair => $"{pair.Key}={pair.Value}"));
+                LogLine(
+                    $"fallback_pickup_miss: bot={bot.Id} preferred={preferredItemType ?? "-"} inventory={bot.Inventory.Count} stuck={StuckRounds.GetValueOrDefault(bot.Id)} outstanding=[{outstandingTypes}]");
+            }
+            return null;
+        }
+
+        RecentFallbackPickupSuccesses++;
+
+        return new BotTask
+        {
+            Kind = "pickup_active",
+            OrderId = active.Id,
+            ItemId = candidate.Item.Id,
+            ItemType = candidate.Item.Type,
+            Target = candidate.AccessTarget
+        };
+    }
+
+    private static Dictionary<int, BotTask> AssignFocusedPickupTasks(
+        List<Bot> candidateBots,
+        GameState state,
+        Order order,
+        Dictionary<string, int> demand,
+        List<int[]> deliveryTargets,
+        Dictionary<int, string> preferredTypesByBotId)
+    {
+        var tasks = new Dictionary<int, BotTask>();
+        if (candidateBots.Count == 0 || preferredTypesByBotId.Count == 0)
+        {
+            return tasks;
+        }
+
+        var usedItemIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var bot in candidateBots
+                     .Where(bot => bot.Inventory.Count < 3)
+                     .OrderBy(bot => bot.Id))
+        {
+            var preferredType = preferredTypesByBotId.GetValueOrDefault(bot.Id);
+            if (string.IsNullOrEmpty(preferredType) || demand.GetValueOrDefault(preferredType) <= 0)
+            {
+                continue;
+            }
+
+            var strictDemand = new Dictionary<string, int>(StringComparer.Ordinal)
+            {
+                [preferredType] = demand[preferredType]
+            };
+            var candidate = FindBestPickupCandidate(
+                bot,
+                state.Items.Where(item => string.Equals(item.Type, preferredType, StringComparison.Ordinal)),
+                strictDemand,
+                state,
+                deliveryTargets,
+                usedItemIds,
+                true,
+                preferredType);
+            if (candidate == null)
+            {
+                continue;
+            }
+
+            tasks[bot.Id] = new BotTask
+            {
+                Kind = "pickup_active",
+                OrderId = order.Id,
+                ItemId = candidate.Item.Id,
+                ItemType = candidate.Item.Type,
+                Target = candidate.AccessTarget
+            };
+            usedItemIds.Add(candidate.Item.Id);
+            demand[preferredType]--;
+        }
+
+        return tasks;
+    }
+
+    private static Dictionary<int, BotTask> AssignRedundantFinishPickupTasks(
+        List<Bot> candidateBots,
+        GameState state,
+        Order order,
+        List<int[]> deliveryTargets,
+        HashSet<string> unresolvedTypes,
+        List<BotTask> assignedTasks,
+        Dictionary<int, string> preferredTypesByBotId)
+    {
+        var tasks = new Dictionary<int, BotTask>();
+        if (candidateBots.Count == 0 || unresolvedTypes.Count == 0)
+        {
+            return tasks;
+        }
+
+        var reservedTargets = assignedTasks
+            .Where(task => task.Target != null && task.Target.Length >= 2)
+            .Select(task => (task.Target![0], task.Target[1]))
+            .ToHashSet();
+        var usedItemIds = assignedTasks
+            .Where(task => !string.IsNullOrEmpty(task.ItemId))
+            .Select(task => task.ItemId!)
+            .ToHashSet(StringComparer.Ordinal);
+
+        foreach (var bot in candidateBots)
+        {
+            var preferredType = preferredTypesByBotId.GetValueOrDefault(bot.Id);
+            var candidate = FindBestPickupCandidate(
+                bot,
+                state.Items.Where(item => unresolvedTypes.Contains(item.Type)),
+                unresolvedTypes.ToDictionary(type => type, _ => 1, StringComparer.Ordinal),
+                state,
+                deliveryTargets,
+                usedItemIds,
+                true,
+                preferredType,
+                reservedTargets);
+            if (candidate == null)
+            {
+                continue;
+            }
+
+            tasks[bot.Id] = new BotTask
+            {
+                Kind = "pickup_active",
+                OrderId = order.Id,
+                ItemId = candidate.Item.Id,
+                ItemType = candidate.Item.Type,
+                Target = candidate.AccessTarget
+            };
+            reservedTargets.Add((candidate.AccessTarget[0], candidate.AccessTarget[1]));
+            usedItemIds.Add(candidate.Item.Id);
+
+            if (tasks.Count >= Math.Min(2, unresolvedTypes.Count * 2))
+            {
+                break;
+            }
+        }
+
+        return tasks;
+    }
+
+    private static Dictionary<int, string> BuildActiveFocusAssignments(
+        GameState state,
+        List<Bot> planningOrder,
+        Dictionary<int, string> rolesByBotId,
+        Dictionary<string, int> activeDemand)
+    {
+        var focusesByBotId = new Dictionary<int, string>();
+        var demandTypes = activeDemand
+            .Where(pair => pair.Value > 0)
+            .OrderByDescending(pair => pair.Value)
+            .ThenBy(pair => pair.Key, StringComparer.Ordinal)
+            .Select(pair => pair.Key)
+            .ToList();
+        if (demandTypes.Count == 0)
+        {
+            return focusesByBotId;
+        }
+
+        foreach (var bot in planningOrder)
+        {
+            var role = rolesByBotId.GetValueOrDefault(bot.Id, "reserve");
+            if (role != "active_picker" && role != "buffer")
+            {
+                continue;
+            }
+
+            var persistedFocus = RoleAssignments.GetValueOrDefault(bot.Id)?.FocusItemType;
+            if (!string.IsNullOrEmpty(persistedFocus) && activeDemand.GetValueOrDefault(persistedFocus) > 0)
+            {
+                focusesByBotId[bot.Id] = persistedFocus;
+                continue;
+            }
+
+            var selectedFocus = demandTypes
+                .Select(type => new
+                {
+                    Type = type,
+                    Distance = state.Items
+                        .Where(item => string.Equals(item.Type, type, StringComparison.Ordinal))
+                        .Select(item => GetPathDistance(bot.Position, item.Position, state))
+                        .DefaultIfEmpty(int.MaxValue)
+                        .Min()
+                })
+                .OrderBy(candidate => candidate.Distance)
+                .ThenByDescending(candidate => activeDemand.GetValueOrDefault(candidate.Type))
+                .ThenBy(candidate => candidate.Type, StringComparer.Ordinal)
+                .Select(candidate => candidate.Type)
+                .FirstOrDefault();
+
+            if (string.IsNullOrEmpty(selectedFocus))
+            {
+                continue;
+            }
+
+            focusesByBotId[bot.Id] = selectedFocus;
+            if (RoleAssignments.TryGetValue(bot.Id, out var existing))
+            {
+                RoleAssignments[bot.Id] = new RoleAssignment
+                {
+                    Role = existing.Role,
+                    LockedUntilRound = existing.LockedUntilRound,
+                    FocusItemType = selectedFocus
+                };
+            }
+        }
+
+        return focusesByBotId;
+    }
+
     private static Dictionary<int, BotTask> AssignPickupTasks(
         List<Bot> candidateBots,
         GameState state,
@@ -699,7 +1187,8 @@ public partial class GroceryBotClient
         Dictionary<string, int> demand,
         List<int[]> deliveryTargets,
         string taskKind,
-        int maxAssignments = int.MaxValue)
+        int maxAssignments = int.MaxValue,
+        Dictionary<int, string>? preferredTypesByBotId = null)
     {
         var tasks = new Dictionary<int, BotTask>();
         if (candidateBots.Count == 0 || maxAssignments <= 0)
@@ -733,7 +1222,8 @@ public partial class GroceryBotClient
                     state,
                     deliveryTargets,
                     usedItemIds,
-                    taskKind == "pickup_active");
+                    taskKind == "pickup_active",
+                    preferredTypesByBotId?.GetValueOrDefault(bot.Id));
                 if (candidate == null)
                 {
                     continue;
@@ -775,7 +1265,8 @@ public partial class GroceryBotClient
         Dictionary<string, int> activeDemand,
         List<int[]> deliveryTargets,
         List<BotTask> assignedTasks,
-        int maxAssignments)
+        int maxAssignments,
+        Dictionary<int, string>? preferredTypesByBotId = null)
     {
         var tasks = new Dictionary<int, BotTask>();
         var reservedTargets = assignedTasks
@@ -790,7 +1281,7 @@ public partial class GroceryBotClient
                 continue;
             }
 
-            var target = GetBestActiveSupportTarget(bot, state, activeDemand, deliveryTargets, reservedTargets);
+            var target = GetBestActiveSupportTarget(bot, state, activeDemand, deliveryTargets, reservedTargets, preferredTypesByBotId?.GetValueOrDefault(bot.Id));
             if (target == null)
             {
                 continue;
@@ -812,7 +1303,8 @@ public partial class GroceryBotClient
         GameState state,
         Dictionary<string, int> activeDemand,
         string orderId,
-        List<int[]> deliveryTargets)
+        List<int[]> deliveryTargets,
+        string? preferredItemType = null)
     {
         if (bot.Inventory.Count >= 3)
         {
@@ -833,7 +1325,8 @@ public partial class GroceryBotClient
             state,
             deliveryTargets,
             [],
-            true);
+            true,
+            preferredItemType);
         if (candidate == null)
         {
             return null;
@@ -1090,7 +1583,7 @@ public partial class GroceryBotClient
             dropOffZonesElement.ValueKind == JsonValueKind.Array)
         {
             state.Drop_off_zones = ReadPointList(dropOffZonesElement);
-            Console.WriteLine($"fallback: mapped drop_off_zones={state.Drop_off_zones.Count}");
+            LogLine($"fallback: mapped drop_off_zones={state.Drop_off_zones.Count}");
         }
 
         if (state.Drop_off.Length == 0 &&
@@ -1207,7 +1700,9 @@ public partial class GroceryBotClient
         GameState state,
         List<int[]> deliveryTargets,
         HashSet<string> excludedItemIds,
-        bool activeOrderPickup)
+        bool activeOrderPickup,
+        string? preferredItemType = null,
+        HashSet<(int X, int Y)>? excludedTargets = null)
     {
         PickupCandidate? best = null;
 
@@ -1220,6 +1715,11 @@ public partial class GroceryBotClient
 
             var accessTarget = FindAdjacentWalkableTarget(item.Position, state, [], [], bot.Position);
             if (accessTarget == null)
+            {
+                continue;
+            }
+
+            if (excludedTargets != null && excludedTargets.Contains((accessTarget[0], accessTarget[1])))
             {
                 continue;
             }
@@ -1241,7 +1741,11 @@ public partial class GroceryBotClient
 
             var loadBonus = (3 - bot.Inventory.Count) * (activeOrderPickup ? 2 : 1);
             var carryBonus = activeOrderPickup && bot.Inventory.Count > 0 ? 4 : 0;
-            var score = (pickupDistance * 3) + deliveryDistance - loadBonus - carryBonus;
+            var preferredTypeBonus = !string.IsNullOrEmpty(preferredItemType) &&
+                                     string.Equals(item.Type, preferredItemType, StringComparison.Ordinal)
+                ? 6
+                : 0;
+            var score = (pickupDistance * 3) + deliveryDistance - loadBonus - carryBonus - preferredTypeBonus;
 
             if (best != null && score >= best.Score)
             {

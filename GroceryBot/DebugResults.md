@@ -1,138 +1,51 @@
-20 bots - 1 run: 
-round_summary: round=25 score=2 score_delta=2 active_outstanding=3 preview_outstanding=4 carry_active=2 carry_preview=2 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=3 preview_picker=3 reserve=2) tasks=(deliver=3 park=2 pickup_active=1 pickup_preview=3 stage=8 support_active=3)
-round_summary: round=50 score=3 score_delta=1 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=4 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=4 preview_picker=4) tasks=(deliver=4 hold_preview=1 pickup_preview=3 stage=9 support_active=3)
-round_summary: round=75 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=4 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=4 preview_picker=4) tasks=(deliver=4 hold_preview=1 pickup_preview=3 stage=9 support_active=3)
-round_summary: round=100 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=4 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=4 preview_picker=4) tasks=(deliver=4 hold_preview=1 pickup_preview=3 stage=9 support_active=3)
-round_summary: round=125 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=5 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=4 preview_picker=4) tasks=(deliver=4 hold_preview=2 pickup_preview=2 stage=9 support_active=3)
-round_summary: round=150 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=5 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=4 preview_picker=4) tasks=(deliver=4 hold_preview=2 pickup_preview=2 stage=9 support_active=3)
-round_summary: round=175 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=5 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=4 preview_picker=4) tasks=(deliver=4 hold_preview=2 pickup_preview=2 stage=9 support_active=3)
-round_summary: round=200 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=5 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=4 preview_picker=4) tasks=(deliver=4 hold_preview=2 pickup_preview=2 stage=9 support_active=3)
-round_summary: round=225 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=5 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=4 preview_picker=4) tasks=(deliver=4 hold_preview=2 pickup_preview=2 stage=9 support_active=3)
-round_summary: round=250 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=5 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=4 preview_picker=4) tasks=(deliver=4 hold_preview=2 pickup_preview=2 stage=9 support_active=3)
-round_summary: round=275 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=5 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=4 preview_picker=4) tasks=(deliver=4 hold_preview=2 pickup_preview=2 stage=9 support_active=3)
-warning: server reported timeout for round 288; received_at_utc=2026-03-12T15:38:08.2067237+00:00 receive_gap_ms=2 gc0=482 gc1=9 gc2=1; clearing transient planner state
-task_summary: deliver=4 hold_preview=2 pickup_preview=2 stage=9 support_active=3
-timing: round=288 allocate_ms=44 corridor_ms=0 execute_ms=0 total_ms=45
-round_timing: round=288 receive_to_build_ms=0 build_ms=45 serialize_ms=0 send_ms=0 total_ms=45
-round_summary: round=300 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=5 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=4 preview_picker=4) tasks=(deliver=4 hold_preview=2 pickup_preview=2 stage=9 support_active=3)
-round_summary: round=325 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=5 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=4 preview_picker=4) tasks=(deliver=4 hold_preview=2 pickup_preview=2 stage=9 support_active=3)
-round_summary: round=350 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=5 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=4 preview_picker=4) tasks=(deliver=4 hold_preview=2 pickup_preview=2 stage=9 support_active=3)
-round_summary: round=375 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=6 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=4 preview_picker=4) tasks=(deliver=4 hold_preview=1 pickup_preview=3 stage=9 support_active=3)
-round_summary: round=400 score=4 score_delta=1 active_outstanding=1 preview_outstanding=4 carry_active=1 carry_preview=6 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=4 preview_picker=4) tasks=(deliver=4 hold_preview=2 pickup_preview=2 stage=9 support_active=3)
-round_summary: round=425 score=4 score_delta=0 active_outstanding=1 preview_outstanding=4 carry_active=1 carry_preview=6 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=4 preview_picker=4) tasks=(deliver=4 hold_preview=2 pickup_preview=2 stage=9 support_active=3)
-round_summary: round=450 score=4 score_delta=0 active_outstanding=1 preview_outstanding=4 carry_active=1 carry_preview=6 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=4 preview_picker=4) tasks=(deliver=4 hold_preview=2 pickup_preview=2 stage=9 support_active=3)
-round_summary: round=475 score=4 score_delta=0 active_outstanding=1 preview_outstanding=4 carry_active=1 carry_preview=6 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=5 reserve=3) tasks=(deliver=5 park=3 stage=9 support_active=3)
-round_summary: round=499 score=4 score_delta=0 active_outstanding=1 preview_outstanding=4 carry_active=1 carry_preview=6 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=5 reserve=3) tasks=(deliver=5 park=3 stage=9 support_active=3)
-game over! Score: 4
-
-20 bots - 2nd run:
-warning: server reported timeout for round 24; received_at_utc=2026-03-12T15:44:20.8426079+00:00 receive_gap_ms=1 gc0=56 gc1=1 gc2=0; clearing transient planner state
-task_summary: deliver=2 park=6 pickup_active=1 stage=8 support_active=3
-timing: round=24 allocate_ms=45 corridor_ms=0 execute_ms=0 total_ms=47
-round_timing: round=24 receive_to_build_ms=0 build_ms=47 serialize_ms=0 send_ms=0 total_ms=47
-round_summary: round=25 score=2 score_delta=2 active_outstanding=3 preview_outstanding=4 carry_active=2 carry_preview=1 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=2 reserve=6) tasks=(deliver=2 park=6 pickup_active=1 stage=8 support_active=3)
-round_summary: round=50 score=2 score_delta=0 active_outstanding=3 preview_outstanding=4 carry_active=2 carry_preview=1 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=2 reserve=6) tasks=(deliver=2 park=6 pickup_active=1 stage=8 support_active=3)
-round_summary: round=75 score=2 score_delta=0 active_outstanding=3 preview_outstanding=4 carry_active=3 carry_preview=1 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=3 reserve=5) tasks=(deliver=3 park=5 stage=9 support_active=3)
-round_summary: round=100 score=2 score_delta=0 active_outstanding=3 preview_outstanding=4 carry_active=3 carry_preview=1 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=3 reserve=5) tasks=(deliver=3 park=5 stage=9 support_active=3)
-round_summary: round=125 score=3 score_delta=1 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=1 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=3 reserve=5) tasks=(deliver=3 park=5 stage=9 support_active=3)
-round_summary: round=150 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=1 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=3 reserve=5) tasks=(deliver=3 park=5 stage=9 support_active=3)
-round_summary: round=175 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=1 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=3 reserve=5) tasks=(deliver=3 park=5 stage=9 support_active=3)
-round_summary: round=200 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=1 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=3 reserve=5) tasks=(deliver=3 park=5 stage=9 support_active=3)
-round_summary: round=225 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=1 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=3 reserve=5) tasks=(deliver=3 park=5 stage=9 support_active=3)
-round_summary: round=250 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=1 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=3 reserve=5) tasks=(deliver=3 park=5 stage=9 support_active=3)
-round_summary: round=275 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=1 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=3 reserve=5) tasks=(deliver=3 park=5 stage=9 support_active=3)
-round_summary: round=300 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=1 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=3 reserve=5) tasks=(deliver=3 park=5 stage=9 support_active=3)
-round_summary: round=325 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=1 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=3 reserve=5) tasks=(deliver=3 park=5 stage=9 support_active=3)
-round_summary: round=350 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=1 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=3 reserve=5) tasks=(deliver=3 park=5 stage=9 support_active=3)
-round_summary: round=375 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=1 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=3 reserve=5) tasks=(deliver=3 park=5 stage=9 support_active=3)
-round_summary: round=400 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=1 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=3 reserve=5) tasks=(deliver=3 park=5 stage=9 support_active=3)
-round_summary: round=425 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=1 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=3 reserve=5) tasks=(deliver=3 park=5 stage=9 support_active=3)
-round_summary: round=450 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=1 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=3 reserve=5) tasks=(deliver=3 park=5 stage=9 support_active=3)
-round_summary: round=475 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=1 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=3 reserve=5) tasks=(deliver=3 park=5 stage=9 support_active=3)
-round_summary: round=499 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=1 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=3 reserve=5) tasks=(deliver=3 park=5 stage=9 support_active=3)
-game over! Score: 3
-
-20 bots - 3rd run:
-round_summary: planner=role-v3 round=25 score=1 score_delta=1 active_outstanding=4 preview_outstanding=4 carry_active=2 carry_preview=1 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=2 reserve=6) tasks=(deliver=2 park=6 pickup_active=2 stage=7 support_active=3)
-warning: server reported timeout for round 35; received_at_utc=2026-03-12T15:49:58.9607143+00:00 receive_gap_ms=1 gc0=90 gc1=2 gc2=1; clearing transient planner state
-task_summary: deliver=4 park=4 pickup_active=1 stage=8 support_active=3
-timing: round=35 allocate_ms=54 corridor_ms=0 execute_ms=0 total_ms=56
-round_timing: round=35 receive_to_build_ms=0 build_ms=56 serialize_ms=0 send_ms=0 total_ms=56
-warning: server reported timeout for round 36; received_at_utc=2026-03-12T15:50:08.1938456+00:00 receive_gap_ms=0 gc0=93 gc1=2 gc2=1; clearing transient planner state
-task_summary: deliver=4 park=4 stage=9 support_active=3
-timing: round=36 allocate_ms=77 corridor_ms=0 execute_ms=0 total_ms=78
-round_timing: round=36 receive_to_build_ms=1 build_ms=78 serialize_ms=0 send_ms=0 total_ms=79
-round_summary: planner=role-v3 round=50 score=1 score_delta=0 active_outstanding=4 preview_outstanding=4 carry_active=5 carry_preview=2 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=4 reserve=4) tasks=(deliver=5 park=4 stage=8 support_active=3)
-round_summary: planner=role-v3 round=75 score=2 score_delta=1 active_outstanding=3 preview_outstanding=4 carry_active=4 carry_preview=2 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=4 reserve=4) tasks=(deliver=4 park=4 stage=9 support_active=3)
-warning: server reported timeout for round 75; received_at_utc=2026-03-12T15:50:23.2469870+00:00 receive_gap_ms=0 gc0=165 gc1=3 gc2=1; clearing transient planner state
-task_summary: deliver=4 park=4 stage=9 support_active=3
-timing: round=75 allocate_ms=39 corridor_ms=0 execute_ms=0 total_ms=40
-round_timing: round=75 receive_to_build_ms=0 build_ms=40 serialize_ms=0 send_ms=0 total_ms=40
-round_summary: planner=role-v3 round=100 score=2 score_delta=0 active_outstanding=3 preview_outstanding=4 carry_active=5 carry_preview=2 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=4 reserve=4) tasks=(deliver=4 park=4 stage=9 support_active=3)
-round_summary: planner=role-v3 round=125 score=4 score_delta=2 active_outstanding=1 preview_outstanding=4 carry_active=2 carry_preview=1 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=3 preview_picker=2 reserve=3) tasks=(deliver=3 park=3 pickup_preview=2 stage=9 support_active=3)
-warning: server reported timeout for round 144; received_at_utc=2026-03-12T15:50:33.9491121+00:00 receive_gap_ms=0 gc0=284 gc1=5 gc2=1; clearing transient planner state
-task_summary: deliver=4 park=4 pickup_active=2 stage=7 support_active=3
-timing: round=144 allocate_ms=57 corridor_ms=0 execute_ms=0 total_ms=59
-round_timing: round=144 receive_to_build_ms=0 build_ms=59 serialize_ms=0 send_ms=0 total_ms=59
-round_summary: planner=role-v3 round=150 score=10 score_delta=6 active_outstanding=4 preview_outstanding=4 carry_active=4 carry_preview=2 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=4 reserve=4) tasks=(deliver=4 park=4 pickup_active=2 stage=7 support_active=3)
-warning: server reported timeout for round 167; received_at_utc=2026-03-12T15:50:40.3645128+00:00 receive_gap_ms=0 gc0=333 gc1=5 gc2=1; clearing transient planner state
-task_summary: deliver=4 park=4 pickup_active=2 stage=7 support_active=3
-timing: round=167 allocate_ms=71 corridor_ms=0 execute_ms=0 total_ms=73
-round_timing: round=167 receive_to_build_ms=0 build_ms=73 serialize_ms=0 send_ms=0 total_ms=73
-warning: server reported timeout for round 168; received_at_utc=2026-03-12T15:50:40.4423130+00:00 receive_gap_ms=0 gc0=336 gc1=5 gc2=1; clearing transient planner state
-task_summary: deliver=4 park=4 pickup_active=2 stage=7 support_active=3
-timing: round=168 allocate_ms=76 corridor_ms=0 execute_ms=0 total_ms=77
-round_timing: round=168 receive_to_build_ms=0 build_ms=77 serialize_ms=0 send_ms=0 total_ms=77
-round_summary: planner=role-v3 round=175 score=10 score_delta=0 active_outstanding=4 preview_outstanding=4 carry_active=6 carry_preview=4 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=4 reserve=4) tasks=(deliver=4 park=4 pickup_active=2 stage=8 support_active=2)
-round_summary: planner=role-v3 round=200 score=10 score_delta=0 active_outstanding=4 preview_outstanding=4 carry_active=9 carry_preview=4 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=4 reserve=4) tasks=(deliver=4 park=4 pickup_active=1 stage=8 support_active=3)
-round_summary: planner=role-v3 round=225 score=10 score_delta=0 active_outstanding=4 preview_outstanding=4 carry_active=9 carry_preview=4 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=4 reserve=4) tasks=(deliver=4 park=4 pickup_active=1 stage=8 support_active=3)
-round_summary: planner=role-v3 round=250 score=10 score_delta=0 active_outstanding=4 preview_outstanding=4 carry_active=10 carry_preview=5 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=4 reserve=4) tasks=(deliver=5 park=4 stage=8 support_active=3)
-round_summary: planner=role-v3 round=275 score=12 score_delta=2 active_outstanding=2 preview_outstanding=4 carry_active=8 carry_preview=5 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=4 reserve=4) tasks=(deliver=4 park=4 pickup_active=1 stage=8 support_active=3)
-round_summary: planner=role-v3 round=300 score=12 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=8 carry_preview=5 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=4 reserve=4) tasks=(deliver=4 park=4 stage=9 support_active=3)
-round_summary: planner=role-v3 round=325 score=12 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=8 carry_preview=5 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=4 reserve=4) tasks=(deliver=4 park=4 pickup_active=1 stage=8 support_active=3)
-round_summary: planner=role-v3 round=350 score=12 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=8 carry_preview=5 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=4 reserve=4) tasks=(deliver=4 park=4 stage=9 support_active=3)
-warning: server reported timeout for round 374; received_at_utc=2026-03-12T15:51:00.1019461+00:00 receive_gap_ms=0 gc0=693 gc1=6 gc2=1; clearing transient planner state
-task_summary: deliver=4 park=4 stage=9 support_active=3
-timing: round=374 allocate_ms=28 corridor_ms=0 execute_ms=0 total_ms=29
-round_timing: round=374 receive_to_build_ms=0 build_ms=29 serialize_ms=0 send_ms=0 total_ms=29
-round_summary: planner=role-v3 round=375 score=12 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=9 carry_preview=6 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=4 reserve=4) tasks=(deliver=4 park=4 pickup_active=1 stage=8 support_active=3)
-round_summary: planner=role-v3 round=400 score=13 score_delta=1 active_outstanding=1 preview_outstanding=4 carry_active=4 carry_preview=6 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=4 preview_picker=2 reserve=2) tasks=(deliver=4 hold_preview=1 park=2 pickup_preview=1 stage=10 support_active=2)
-round_summary: planner=role-v3 round=425 score=13 score_delta=0 active_outstanding=1 preview_outstanding=4 carry_active=4 carry_preview=6 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=4 preview_picker=2 reserve=2) tasks=(deliver=4 hold_preview=1 park=2 pickup_preview=1 stage=10 support_active=2)
-round_summary: planner=role-v3 round=450 score=13 score_delta=0 active_outstanding=1 preview_outstanding=4 carry_active=4 carry_preview=6 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=4 preview_picker=2 reserve=2) tasks=(deliver=4 hold_preview=1 park=2 pickup_preview=1 stage=10 support_active=2)
-round_summary: planner=role-v3 round=475 score=13 score_delta=0 active_outstanding=1 preview_outstanding=4 carry_active=4 carry_preview=6 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=5 reserve=3) tasks=(deliver=5 park=3 stage=10 support_active=2)
-round_summary: planner=role-v3 round=499 score=13 score_delta=0 active_outstanding=1 preview_outstanding=4 carry_active=5 carry_preview=6 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=3 courier=5 reserve=3) tasks=(deliver=5 park=3 stage=11 support_active=1)
-game over! Score: 13
-
-20 bots - 4th run:
-task_summary: park=9 pickup_active=5 stage=4 support_active=2
-timing: round=6 allocate_ms=58 corridor_ms=0 execute_ms=0 total_ms=62
-round_timing: round=6 receive_to_build_ms=0 build_ms=62 serialize_ms=0 send_ms=0 total_ms=63
-round_summary: planner=role-v4 round=25 score=0 score_delta=0 active_outstanding=5 preview_outstanding=4 carry_active=2 carry_preview=0 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=2 courier=2 reserve=7) tasks=(deliver=2 park=7 pickup_active=3 stage=6 support_active=2)
-warning: server reported timeout for round 32; received_at_utc=2026-03-12T15:55:09.8544052+00:00 receive_gap_ms=0 gc0=90 gc1=2 gc2=1; clearing transient planner state
-task_summary: deliver=2 park=7 pickup_active=3 stage=6 support_active=2
-timing: round=32 allocate_ms=177 corridor_ms=0 execute_ms=0 total_ms=181
-round_timing: round=32 receive_to_build_ms=0 build_ms=181 serialize_ms=0 send_ms=0 total_ms=181
-round_summary: planner=role-v4 round=50 score=0 score_delta=0 active_outstanding=5 preview_outstanding=4 carry_active=3 carry_preview=0 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=2 courier=3 reserve=6) tasks=(deliver=3 park=6 pickup_active=2 stage=7 support_active=2)
-round_summary: planner=role-v4 round=75 score=0 score_delta=0 active_outstanding=5 preview_outstanding=4 carry_active=5 carry_preview=0 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=2 courier=4 reserve=5) tasks=(deliver=4 park=5 pickup_active=2 stage=7 support_active=2)
-round_summary: planner=role-v4 round=100 score=1 score_delta=1 active_outstanding=4 preview_outstanding=4 carry_active=2 carry_preview=1 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=2 courier=4 reserve=5) tasks=(deliver=4 park=5 pickup_active=1 stage=8 support_active=2)
-round_summary: planner=role-v4 round=125 score=3 score_delta=2 active_outstanding=2 preview_outstanding=4 carry_active=1 carry_preview=0 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=2 courier=4 reserve=5) tasks=(deliver=4 park=5 pickup_active=1 stage=8 support_active=2)
-warning: server reported timeout for round 126; received_at_utc=2026-03-12T15:55:29.8213115+00:00 receive_gap_ms=0 gc0=365 gc1=3 gc2=1; clearing transient planner state
-task_summary: deliver=4 park=5 pickup_active=1 stage=8 support_active=2
-timing: round=126 allocate_ms=86 corridor_ms=0 execute_ms=0 total_ms=88
-round_timing: round=126 receive_to_build_ms=0 build_ms=88 serialize_ms=0 send_ms=0 total_ms=88
-round_summary: planner=role-v4 round=150 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=1 carry_preview=0 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=2 courier=4 reserve=5) tasks=(deliver=4 park=5 pickup_active=1 stage=8 support_active=2)
-round_summary: planner=role-v4 round=175 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=0 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=2 courier=4 reserve=5) tasks=(deliver=4 park=5 stage=9 support_active=2)
-round_summary: planner=role-v4 round=200 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=0 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=2 courier=4 reserve=5) tasks=(deliver=4 park=5 stage=9 support_active=2)
-round_summary: planner=role-v4 round=225 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=0 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=2 courier=4 reserve=5) tasks=(deliver=4 park=5 stage=9 support_active=2)
-round_summary: planner=role-v4 round=250 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=0 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=2 courier=4 reserve=5) tasks=(deliver=4 park=5 stage=9 support_active=2)
-round_summary: planner=role-v4 round=275 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=0 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=2 courier=4 reserve=5) tasks=(deliver=4 park=5 stage=9 support_active=2)
-round_summary: planner=role-v4 round=300 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=0 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=2 courier=4 reserve=5) tasks=(deliver=4 park=5 stage=9 support_active=2)
-round_summary: planner=role-v4 round=325 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=0 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=2 courier=4 reserve=5) tasks=(deliver=4 park=5 stage=9 support_active=2)
-round_summary: planner=role-v4 round=350 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=0 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=2 courier=4 reserve=5) tasks=(deliver=4 park=5 stage=9 support_active=2)
-round_summary: planner=role-v4 round=375 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=0 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=2 courier=4 reserve=5) tasks=(deliver=4 park=5 stage=9 support_active=2)
-round_summary: planner=role-v4 round=400 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=0 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=2 courier=4 reserve=5) tasks=(deliver=4 park=5 stage=9 support_active=2)
-round_summary: planner=role-v4 round=425 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=0 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=2 courier=4 reserve=5) tasks=(deliver=4 park=5 stage=9 support_active=2)
-round_summary: planner=role-v4 round=450 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=0 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=2 courier=4 reserve=5) tasks=(deliver=4 park=5 stage=9 support_active=2)
-round_summary: planner=role-v4 round=475 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=0 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=2 courier=5 reserve=4) tasks=(deliver=5 park=4 stage=9 support_active=2)
-round_summary: planner=role-v4 round=499 score=3 score_delta=0 active_outstanding=2 preview_outstanding=4 carry_active=2 carry_preview=0 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=9 buffer=2 courier=5 reserve=4) tasks=(deliver=5 park=4 stage=9 support_active=2)
-game over! Score: 3
+﻿Connecting to websocket
+Connected. Bot is moving. Press Ctrl+C to stop.
+round_summary: planner=role-v5 round=25 score=0 score_delta=0 active_outstanding=6 preview_outstanding=4 carry_active=5 carry_preview=4 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=6 buffer=1 courier=3) tasks=(deliver=3 pickup_active=2 stage=4 support_active=1)
+active_demand: apples=2,eggs=2,cream=1,onions=1
+active_world: apples:8,eggs:8,cream:8,onions:5
+fallback_pickups: attempts=0 successes=0 no_candidate=0
+round_summary: planner=role-v5 round=50 score=5 score_delta=5 active_outstanding=1 preview_outstanding=4 carry_active=1 carry_preview=2 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=6 buffer=1 courier=3) tasks=(deliver=1 stage=8 support_active=1)
+active_demand: onions=1
+active_world: onions:5
+fallback_pickups: attempts=0 successes=0 no_candidate=0
+round_summary: planner=role-v5 round=75 score=12 score_delta=7 active_outstanding=3 preview_outstanding=4 carry_active=2 carry_preview=1 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=6 buffer=2 courier=2) tasks=(deliver=2 stage=6 support_active=2)
+active_demand: apples=1,bananas=1,bread=1
+active_world: apples:8,bananas:8,bread:10
+fallback_pickups: attempts=0 successes=0 no_candidate=0
+round_summary: planner=role-v5 round=100 score=21 score_delta=9 active_outstanding=3 preview_outstanding=4 carry_active=1 carry_preview=0 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=6 buffer=2 courier=2) tasks=(deliver=2 pickup_active=2 stage=4 support_active=2)
+active_demand: onions=1,tomatoes=1,yogurt=1
+active_world: onions:5,tomatoes:5,yogurt:8
+fallback_pickups: attempts=0 successes=0 no_candidate=0
+round_summary: planner=role-v5 round=125 score=22 score_delta=1 active_outstanding=2 preview_outstanding=4 carry_active=1 carry_preview=0 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=6 buffer=1 courier=2 reserve=1) tasks=(deliver=1 park=1 pickup_active=1 stage=6 support_active=1)
+active_demand: onions=1,tomatoes=1
+active_world: onions:5,tomatoes:5
+fallback_pickups: attempts=0 successes=0 no_candidate=0
+round_summary: planner=role-v5 round=150 score=29 score_delta=7 active_outstanding=4 preview_outstanding=5 carry_active=1 carry_preview=0 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=6 buffer=2 courier=2) tasks=(deliver=2 pickup_active=3 stage=3 support_active=2)
+active_demand: butter=2,flour=1,rice=1
+active_world: butter:8,flour:8,rice:8
+fallback_pickups: attempts=0 successes=0 no_candidate=0
+round_summary: planner=role-v5 round=175 score=38 score_delta=9 active_outstanding=5 preview_outstanding=6 carry_active=0 carry_preview=1 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=6 buffer=2 courier=1 reserve=1) tasks=(deliver=1 park=1 pickup_active=5 stage=1 support_active=2)
+active_demand: eggs=2,bananas=1,cheese=1,rice=1
+active_world: eggs:8,bananas:8,cheese:8,rice:8
+fallback_pickups: attempts=0 successes=0 no_candidate=0
+round_summary: planner=role-v5 round=200 score=40 score_delta=2 active_outstanding=3 preview_outstanding=6 carry_active=3 carry_preview=3 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=6 buffer=2 courier=2) tasks=(deliver=3 stage=5 support_active=2)
+active_demand: eggs=2,bananas=1
+active_world: eggs:8,bananas:8
+fallback_pickups: attempts=0 successes=0 no_candidate=0
+round_summary: planner=role-v5 round=225 score=49 score_delta=9 active_outstanding=5 preview_outstanding=6 carry_active=3 carry_preview=1 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=6 buffer=2 courier=2) tasks=(deliver=2 pickup_active=2 stage=4 support_active=2)
+active_demand: apples=1,eggs=1,milk=1,tomatoes=1,yogurt=1
+active_world: apples:8,eggs:8,milk:5,tomatoes:5,yogurt:8
+fallback_pickups: attempts=0 successes=0 no_candidate=0
+round_summary: planner=role-v5 round=250 score=51 score_delta=2 active_outstanding=3 preview_outstanding=6 carry_active=4 carry_preview=3 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=6 buffer=1 courier=3) tasks=(deliver=4 stage=5 support_active=1)
+active_demand: apples=1,milk=1,tomatoes=1
+active_world: apples:8,milk:5,tomatoes:5
+fallback_pickups: attempts=0 successes=0 no_candidate=0
+round_summary: planner=role-v5 round=275 score=53 score_delta=2 active_outstanding=1 preview_outstanding=6 carry_active=1 carry_preview=2 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=6 courier=2 reserve=2) tasks=(deliver=1 park=2 stage=7)
+active_demand: milk=1
+active_world: milk:5
+fallback_pickups: attempts=0 successes=0 no_candidate=0
+round_summary: planner=role-v5 round=299 score=53 score_delta=0 active_outstanding=1 preview_outstanding=6 carry_active=1 carry_preview=2 pickup_no_effect=0 dropoff_no_effect=0 roles=(active_picker=6 courier=2 reserve=2) tasks=(deliver=2 park=2 stage=6)
+active_demand: milk=1
+active_world: milk:5
+fallback_pickups: attempts=0 successes=0 no_candidate=0
+game over! Score: 53

@@ -13,6 +13,7 @@ public partial class GroceryBotClient
     public static async Task Play()
     {
         Env.Load();
+        InitializeLogging();
         DebugLogging = string.Equals(Environment.GetEnvironmentVariable("GROCERY_DEBUG"), "1", StringComparison.Ordinal);
         TimingLogging = string.Equals(Environment.GetEnvironmentVariable("GROCERY_TIMING"), "1", StringComparison.Ordinal);
 
@@ -20,7 +21,7 @@ public partial class GroceryBotClient
 
         if (string.IsNullOrEmpty(_wsUrl))
         {
-            Console.WriteLine("url must not be empty.");
+            LogLine("url must not be empty.");
             return;
         }
 
@@ -31,7 +32,7 @@ public partial class GroceryBotClient
             cts.Cancel();
         };
 
-        Console.WriteLine("Connecting to websocket");
+        LogLine("Connecting to websocket");
 
         try
         {
@@ -39,12 +40,12 @@ public partial class GroceryBotClient
         }
         catch (WebSocketException ex)
         {
-            Console.WriteLine($"Connection failed: {ex.Message}");
-            Console.WriteLine("In case of 403 generate fresh token");
+            LogLine($"Connection failed: {ex.Message}");
+            LogLine("In case of 403 generate fresh token");
             return;
         }
 
-        Console.WriteLine("Connected. Bot is moving. Press Ctrl+C to stop.");
+        LogLine("Connected. Bot is moving. Press Ctrl+C to stop.");
 
         try
         {
@@ -63,7 +64,7 @@ public partial class GroceryBotClient
                 if (state.Type == "game_over")
                 {
                     ResetGameTracking();
-                    Console.WriteLine($"game over! Score: {state.Score}");
+                    LogLine($"game over! Score: {state.Score}");
                     break;
                 }
 
@@ -74,7 +75,7 @@ public partial class GroceryBotClient
 
                 if (state.Bots.Count == 0)
                 {
-                    Console.WriteLine("Bots is empty or null");
+                    LogLine("Bots is empty or null");
                     break;
                 }
 
@@ -111,48 +112,48 @@ public partial class GroceryBotClient
                 {
                     if (!string.IsNullOrEmpty(LastPlannerTiming))
                     {
-                        Console.WriteLine(LastPlannerTiming);
+                        LogLine(LastPlannerTiming);
                     }
 
-                    Console.WriteLine(LastRoundTiming);
-                    Console.WriteLine(
+                    LogLine(LastRoundTiming);
+                    LogLine(
                         $"warning: slow round round={state.Round} decision_ms={roundTimer.ElapsedMilliseconds} actions={decision.Actions.Length}");
                 }
             }
         }
         catch (OperationCanceledException) when (cts.IsCancellationRequested)
         {
-            Console.WriteLine("Cancelled.");
+            LogLine("Cancelled.");
         }
         catch (WebSocketException ex)
         {
-            Console.WriteLine($"WebSocket disconnected: {ex.Message}");
+            LogLine($"WebSocket disconnected: {ex.Message}");
         }
         catch (IOException ex)
         {
-            Console.WriteLine($"Transport closed: {ex.Message}");
+            LogLine($"Transport closed: {ex.Message}");
         }
     }
 
     private static void HandleTimeout(GameState state, long receivedAt)
     {
-        Console.WriteLine(
+        LogLine(
             $"warning: server reported timeout for round {state.Round - 1}; received_at_utc={DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture)} receive_gap_ms={GetElapsedMilliseconds(receivedAt, Stopwatch.GetTimestamp())} gc0={GC.CollectionCount(0)} gc1={GC.CollectionCount(1)} gc2={GC.CollectionCount(2)}; clearing transient planner state");
         if (!string.IsNullOrEmpty(LastTaskSummary))
         {
-            Console.WriteLine($"task_summary: {LastTaskSummary}");
+            LogLine($"task_summary: {LastTaskSummary}");
         }
         RecoveryRoundsRemaining = RecoveryWindowRounds;
         if (TimingLogging)
         {
             if (!string.IsNullOrEmpty(LastPlannerTiming))
             {
-                Console.WriteLine(LastPlannerTiming);
+                LogLine(LastPlannerTiming);
             }
 
             if (!string.IsNullOrEmpty(LastRoundTiming))
             {
-                Console.WriteLine(LastRoundTiming);
+                LogLine(LastRoundTiming);
             }
         }
 
@@ -180,9 +181,15 @@ public partial class GroceryBotClient
         CurrentRoundCache = null;
         LastTaskSummary = null;
         LastRoleSummary = null;
+        LastActiveDemandSummary = null;
+        LastActiveWorldSummary = null;
+        LastFallbackPickupSummary = null;
         LastObservedScore = 0;
         RecentPickupNoEffectCount = 0;
         RecentDropoffNoEffectCount = 0;
+        RecentFallbackPickupAttempts = 0;
+        RecentFallbackPickupSuccesses = 0;
+        RecentFallbackPickupNoCandidate = 0;
         RecoveryRoundsRemaining = 0;
     }
 
@@ -200,7 +207,7 @@ public partial class GroceryBotClient
                 result = await _socket.ReceiveAsync(buffer, ct);
                 if (result.MessageType == WebSocketMessageType.Close)
                 {
-                    Console.WriteLine($"Server closed: {result.CloseStatus} {result.CloseStatusDescription}");
+                    LogLine($"Server closed: {result.CloseStatus} {result.CloseStatusDescription}");
                     return new GameState();
                 }
 
@@ -215,7 +222,7 @@ public partial class GroceryBotClient
                 PopulateFallbackFields(mappedResult, payloadText);
                 if (DebugLogging)
                 {
-                    Console.WriteLine($"Round: {mappedResult.Round}");
+                    LogLine($"Round: {mappedResult.Round}");
                 }
                 return mappedResult;
             }

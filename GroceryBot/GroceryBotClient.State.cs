@@ -22,9 +22,15 @@ public partial class GroceryBotClient
     private static string? LastRoundTiming;
     private static string? LastTaskSummary;
     private static string? LastRoleSummary;
+    private static string? LastActiveDemandSummary;
+    private static string? LastActiveWorldSummary;
+    private static string? LastFallbackPickupSummary;
     private static int LastObservedScore;
     private static int RecentPickupNoEffectCount;
     private static int RecentDropoffNoEffectCount;
+    private static int RecentFallbackPickupAttempts;
+    private static int RecentFallbackPickupSuccesses;
+    private static int RecentFallbackPickupNoCandidate;
     private static int RecoveryRoundsRemaining;
     private static GameState? LastObservedState;
     private static string? LastPayload;
@@ -37,7 +43,7 @@ public partial class GroceryBotClient
     private const int EndgameRounds = 35;
     private const int RoleLockRounds = 10;
     private const int SummaryIntervalRounds = 25;
-    private const string PlannerVersion = "role-v4";
+    private const string PlannerVersion = "role-v5";
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -68,6 +74,7 @@ public partial class GroceryBotClient
     {
         public required string Role { get; init; }
         public required int LockedUntilRound { get; init; }
+        public string? FocusItemType { get; init; }
     }
 
     private sealed class PickupCandidate

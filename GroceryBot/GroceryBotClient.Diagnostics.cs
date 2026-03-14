@@ -67,7 +67,7 @@ public partial class GroceryBotClient
 
             var actual = (X: bot.Position[0], Y: bot.Position[1]);
             var matched = actual.X == plannedMove.X && actual.Y == plannedMove.Y;
-            Console.WriteLine(
+            LogLine(
                 $"result: bot={bot.Id} planned={plannedMove.Action} expected=[{plannedMove.X}, {plannedMove.Y}] actual=[{actual.X}, {actual.Y}] moved={matched}");
         }
     }
@@ -86,12 +86,12 @@ public partial class GroceryBotClient
 
         if (!string.IsNullOrEmpty(previousPayload))
         {
-            Console.WriteLine($"prev_payload: {previousPayload}");
+            LogLine($"prev_payload: {previousPayload}");
         }
 
         if (current.Score != previous.Score)
         {
-            Console.WriteLine($"delta: score {previous.Score}->{current.Score}");
+            LogLine($"delta: score {previous.Score}->{current.Score}");
         }
 
         var previousBots = previous.Bots.ToDictionary(bot => bot.Id);
@@ -106,13 +106,13 @@ public partial class GroceryBotClient
             var currentInventory = string.Join(",", bot.Inventory);
             if (!string.Equals(previousInventory, currentInventory, StringComparison.Ordinal))
             {
-                Console.WriteLine($"delta: bot={bot.Id} inventory [{previousInventory}] -> [{currentInventory}]");
+                LogLine($"delta: bot={bot.Id} inventory [{previousInventory}] -> [{currentInventory}]");
             }
 
             if (previousBot.Position.Length >= 2 && bot.Position.Length >= 2 &&
                 (previousBot.Position[0] != bot.Position[0] || previousBot.Position[1] != bot.Position[1]))
             {
-                Console.WriteLine(
+                LogLine(
                     $"delta: bot={bot.Id} position [{previousBot.Position[0]}, {previousBot.Position[1]}] -> [{bot.Position[0]}, {bot.Position[1]}]");
             }
         }
@@ -121,7 +121,7 @@ public partial class GroceryBotClient
         var currentItemIds = current.Items.Select(item => item.Id).ToHashSet(StringComparer.Ordinal);
         foreach (var removedItemId in previousItemIds.Except(currentItemIds).OrderBy(id => id))
         {
-            Console.WriteLine($"delta: item_removed {removedItemId}");
+            LogLine($"delta: item_removed {removedItemId}");
         }
 
         var previousOrders = previous.Orders.ToDictionary(order => order.Id);
@@ -136,13 +136,13 @@ public partial class GroceryBotClient
             var currentDelivered = string.Join(",", order.Items_delivered);
             if (!string.Equals(previousDelivered, currentDelivered, StringComparison.Ordinal))
             {
-                Console.WriteLine($"delta: order={order.Id} delivered [{previousDelivered}] -> [{currentDelivered}]");
+                LogLine($"delta: order={order.Id} delivered [{previousDelivered}] -> [{currentDelivered}]");
             }
 
             if (!string.Equals(previousOrder.Status, order.Status, StringComparison.Ordinal) ||
                 previousOrder.Complete != order.Complete)
             {
-                Console.WriteLine(
+                LogLine(
                     $"delta: order={order.Id} status {previousOrder.Status}/{previousOrder.Complete} -> {order.Status}/{order.Complete}");
             }
         }
@@ -205,7 +205,7 @@ public partial class GroceryBotClient
             return;
         }
 
-        Console.WriteLine(message);
+        LogLine(message);
     }
 
     private static void MaybeLogRoundSummary(GameState state)
@@ -215,6 +215,9 @@ public partial class GroceryBotClient
             LastObservedScore = state.Score;
             RecentPickupNoEffectCount = 0;
             RecentDropoffNoEffectCount = 0;
+            RecentFallbackPickupAttempts = 0;
+            RecentFallbackPickupSuccesses = 0;
+            RecentFallbackPickupNoCandidate = 0;
             return;
         }
 
@@ -233,14 +236,39 @@ public partial class GroceryBotClient
         var carryingActive = state.Bots.Count(bot => CountMatchingInventory(bot.Inventory, activeDemand) > 0);
         var carryingPreview = state.Bots.Count(bot => CountMatchingInventory(bot.Inventory, previewDemand) > 0);
         var scoreDelta = state.Score - LastObservedScore;
+        LastActiveDemandSummary = string.Join(
+            ",",
+            activeDemand
+                .Where(pair => pair.Value > 0)
+                .OrderByDescending(pair => pair.Value)
+                .ThenBy(pair => pair.Key, StringComparer.Ordinal)
+                .Select(pair => $"{pair.Key}={pair.Value}"));
+        LastActiveWorldSummary = string.Join(
+            ",",
+            activeDemand
+                .Where(pair => pair.Value > 0)
+                .OrderByDescending(pair => pair.Value)
+                .ThenBy(pair => pair.Key, StringComparer.Ordinal)
+                .Select(pair => $"{pair.Key}:{state.Items.Count(item => string.Equals(item.Type, pair.Key, StringComparison.Ordinal))}"));
+        LastFallbackPickupSummary =
+            $"attempts={RecentFallbackPickupAttempts} successes={RecentFallbackPickupSuccesses} no_candidate={RecentFallbackPickupNoCandidate}";
 
-        Console.WriteLine(
+        LogLine(
             $"round_summary: planner={PlannerVersion} round={state.Round} score={state.Score} score_delta={scoreDelta} active_outstanding={activeOutstanding} preview_outstanding={previewOutstanding} " +
             $"carry_active={carryingActive} carry_preview={carryingPreview} pickup_no_effect={RecentPickupNoEffectCount} dropoff_no_effect={RecentDropoffNoEffectCount} " +
             $"roles=({LastRoleSummary ?? "none"}) tasks=({LastTaskSummary ?? "none"})");
+        if (!string.IsNullOrEmpty(LastActiveDemandSummary))
+        {
+            LogLine($"active_demand: {LastActiveDemandSummary}");
+            LogLine($"active_world: {LastActiveWorldSummary}");
+            LogLine($"fallback_pickups: {LastFallbackPickupSummary}");
+        }
 
         LastObservedScore = state.Score;
         RecentPickupNoEffectCount = 0;
         RecentDropoffNoEffectCount = 0;
+        RecentFallbackPickupAttempts = 0;
+        RecentFallbackPickupSuccesses = 0;
+        RecentFallbackPickupNoCandidate = 0;
     }
 }

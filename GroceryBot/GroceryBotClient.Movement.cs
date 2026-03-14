@@ -89,7 +89,7 @@ public partial class GroceryBotClient
             other.Position[0] == next[0] &&
             other.Position[1] == next[1]);
 
-        Console.WriteLine(
+        LogLine(
             $"diag: bot={bot.Id} role={role} current={FormatPoint(bot.Position)} target={FormatPoint(target)} " +
             $"action={action} next={FormatPoint(next)} wall={isWall} shelf={isShelf} " +
             $"blocked_by_bot={(blockingBot == null ? "none" : blockingBot.Id)}");
@@ -447,12 +447,15 @@ public partial class GroceryBotClient
         GameState state,
         Dictionary<string, int> activeDemand,
         List<int[]> deliveryTargets,
-        HashSet<(int X, int Y)> reservedTargets)
+        HashSet<(int X, int Y)> reservedTargets,
+        string? preferredItemType = null)
     {
         return state.Items
             .Where(item => activeDemand.GetValueOrDefault(item.Type) > 0)
             .Select(item => new
             {
+                Preferred = !string.IsNullOrEmpty(preferredItemType) &&
+                            string.Equals(item.Type, preferredItemType, StringComparison.Ordinal),
                 Target = FindAdjacentWalkableTarget(item.Position, state, [], reservedTargets, bot.Position),
                 DeliveryDistance = deliveryTargets.Count == 0
                     ? 0
@@ -461,7 +464,8 @@ public partial class GroceryBotClient
                         : int.MaxValue)
             })
             .Where(candidate => candidate.Target != null)
-            .OrderBy(candidate => GetPathDistance(bot.Position, candidate.Target!, state))
+            .OrderByDescending(candidate => candidate.Preferred)
+            .ThenBy(candidate => GetPathDistance(bot.Position, candidate.Target!, state))
             .ThenBy(candidate => candidate.DeliveryDistance)
             .Select(candidate => candidate.Target)
             .FirstOrDefault();
