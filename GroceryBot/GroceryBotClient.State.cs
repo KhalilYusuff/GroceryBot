@@ -13,8 +13,11 @@ public partial class GroceryBotClient
     private static readonly Dictionary<int, (string Action, int X, int Y)> LastPlannedMoves = new();
     private static readonly Dictionary<int, (string Action, string? ItemId)> LastActionAttempts = new();
     private static readonly Dictionary<int, RoleAssignment> RoleAssignments = new();
+    private static readonly Dictionary<int, FinishAssignmentSnapshot> LastFinishAssignments = new();
     private static readonly Dictionary<int, Queue<(int X, int Y)>> CourierRoutes = new();
     private static readonly Dictionary<int, (string ItemId, int X, int Y)> PickupAccessTargets = new();
+    private static readonly Dictionary<int, PickupProgress> PickupProgressByBotId = new();
+    private static readonly Dictionary<int, DeliveryProgress> DeliveryProgressByBotId = new();
     private static readonly Dictionary<int, int[]> CourierTargets = new();
     private static readonly Dictionary<int, int[]> ParkingTargets = new();
     private static readonly HashSet<(int X, int Y)> KnownShelfCells = [];
@@ -25,16 +28,29 @@ public partial class GroceryBotClient
     private static string? LastActiveDemandSummary;
     private static string? LastActiveWorldSummary;
     private static string? LastFallbackPickupSummary;
+    private static string? LastDeliveryPressureSummary;
+    private static string? LastFutureDemandSummary;
+    private static string? LastKnownNextOrdersSummary;
+    private static string? LastPlannedTimelineSummary;
+    private static string? LastPrefetchBudgetSummary;
+    private static string? LastDayScriptConfidence;
     private static int LastObservedScore;
+    private static int LastTrackedScore;
+    private static int ScoreStagnationRounds;
     private static int RecentPickupNoEffectCount;
     private static int RecentDropoffNoEffectCount;
     private static int RecentFallbackPickupAttempts;
     private static int RecentFallbackPickupSuccesses;
     private static int RecentFallbackPickupNoCandidate;
+    private static int ActiveOrderTurnovers;
     private static int RecoveryRoundsRemaining;
+    private static string? LastTrackedActiveOrderId;
     private static GameState? LastObservedState;
     private static string? LastPayload;
     private static RoundCache? CurrentRoundCache;
+    private static DayKnowledge? CurrentDayKnowledge;
+    private static string? DayKnowledgePath;
+    private static bool DayKnowledgeDirty;
     private static bool DebugLogging;
     private static bool TimingLogging;
 
@@ -84,6 +100,52 @@ public partial class GroceryBotClient
         public required int PickupDistance { get; init; }
         public required int DeliveryDistance { get; init; }
         public required int Score { get; init; }
+    }
+
+    private sealed class FinishAssignmentSnapshot
+    {
+        public required string TaskKind { get; init; }
+        public string? ItemId { get; init; }
+        public string? ItemType { get; init; }
+        public int[]? Target { get; init; }
+        public required int ConsecutiveRounds { get; init; }
+    }
+
+    private sealed class PickupProgress
+    {
+        public required string ItemId { get; init; }
+        public required int TargetX { get; init; }
+        public required int TargetY { get; init; }
+        public required int BestDistance { get; init; }
+        public required int StagnantRounds { get; init; }
+    }
+
+    private sealed class PlannedOrderTimelineEntry
+    {
+        public required string OrderId { get; init; }
+        public required int SequenceIndex { get; init; }
+        public int? FirstPreviewRound { get; init; }
+        public int? FirstActiveRound { get; init; }
+        public required Dictionary<string, int> RequiredCounts { get; init; }
+    }
+
+    private sealed class StrategicPrefetchPlan
+    {
+        public string? TargetOrderId { get; init; }
+        public Dictionary<string, int> Budgets { get; init; } = new(StringComparer.Ordinal);
+        public List<PlannedOrderTimelineEntry> Timeline { get; init; } = [];
+        public bool Enabled { get; init; }
+    }
+
+    private sealed class DeliveryProgress
+    {
+        public required int TargetX { get; init; }
+        public required int TargetY { get; init; }
+        public required int BestDistance { get; init; }
+        public required int StagnantRounds { get; init; }
+        public required int LastX { get; init; }
+        public required int LastY { get; init; }
+        public required int RepeatWindow { get; init; }
     }
 
     private sealed class RoundCache

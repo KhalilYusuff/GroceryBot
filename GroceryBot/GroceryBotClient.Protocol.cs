@@ -14,6 +14,7 @@ public partial class GroceryBotClient
     {
         Env.Load();
         InitializeLogging();
+        InitializeDayKnowledge();
         DebugLogging = string.Equals(Environment.GetEnvironmentVariable("GROCERY_DEBUG"), "1", StringComparison.Ordinal);
         TimingLogging = string.Equals(Environment.GetEnvironmentVariable("GROCERY_TIMING"), "1", StringComparison.Ordinal);
 
@@ -63,6 +64,7 @@ public partial class GroceryBotClient
 
                 if (state.Type == "game_over")
                 {
+                    SaveDayKnowledgeIfDirty();
                     ResetGameTracking();
                     LogLine($"game over! Score: {state.Score}");
                     break;
@@ -160,9 +162,12 @@ public partial class GroceryBotClient
         LastPlannedMoves.Clear();
         LastActionAttempts.Clear();
         RoleAssignments.Clear();
+        LastFinishAssignments.Clear();
         CourierRoutes.Clear();
         CourierTargets.Clear();
         PickupAccessTargets.Clear();
+        PickupProgressByBotId.Clear();
+        DeliveryProgressByBotId.Clear();
         CurrentRoundCache = null;
     }
 
@@ -173,8 +178,11 @@ public partial class GroceryBotClient
         LastPlannedMoves.Clear();
         LastActionAttempts.Clear();
         RoleAssignments.Clear();
+        LastFinishAssignments.Clear();
         CourierRoutes.Clear();
         PickupAccessTargets.Clear();
+        PickupProgressByBotId.Clear();
+        DeliveryProgressByBotId.Clear();
         CourierTargets.Clear();
         ParkingTargets.Clear();
         KnownShelfCells.Clear();
@@ -184,13 +192,24 @@ public partial class GroceryBotClient
         LastActiveDemandSummary = null;
         LastActiveWorldSummary = null;
         LastFallbackPickupSummary = null;
+        LastDeliveryPressureSummary = null;
+        LastFutureDemandSummary = null;
+        LastKnownNextOrdersSummary = null;
+        LastPlannedTimelineSummary = null;
+        LastPrefetchBudgetSummary = null;
+        LastDayScriptConfidence = null;
         LastObservedScore = 0;
+        LastTrackedScore = 0;
+        ScoreStagnationRounds = 0;
         RecentPickupNoEffectCount = 0;
         RecentDropoffNoEffectCount = 0;
         RecentFallbackPickupAttempts = 0;
         RecentFallbackPickupSuccesses = 0;
         RecentFallbackPickupNoCandidate = 0;
+        ActiveOrderTurnovers = 0;
         RecoveryRoundsRemaining = 0;
+        LastTrackedActiveOrderId = null;
+        SaveDayKnowledgeIfDirty();
     }
 
     private static async Task<GameState> Receive(CancellationToken ct)

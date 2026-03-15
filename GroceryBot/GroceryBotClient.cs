@@ -17,6 +17,9 @@ public partial class GroceryBotClient
         CurrentRoundCache = CreateRoundCache(state);
         UpdateProgressTracking(state);
         LogMoveOutcomes(state);
+        ObserveDayKnowledge(state);
+        UpdateStrategicSummaries(state);
+        UpdateScoreStagnation(state);
 
         var deliveryTargets = GetDeliveryTargets(state);
         var occupiedPositions = state.Bots
@@ -102,6 +105,25 @@ public partial class GroceryBotClient
         return actions
             .OrderBy(action => action.BotId)
             .ToArray();
+    }
+
+    private static void UpdateScoreStagnation(GameState state)
+    {
+        if (state.Round == 0)
+        {
+            LastTrackedScore = state.Score;
+            ScoreStagnationRounds = 0;
+            return;
+        }
+
+        if (state.Score > LastTrackedScore)
+        {
+            LastTrackedScore = state.Score;
+            ScoreStagnationRounds = 0;
+            return;
+        }
+
+        ScoreStagnationRounds++;
     }
 
     private static Dictionary<int, BotTask> AllocateTasks(
@@ -325,13 +347,32 @@ public partial class GroceryBotClient
         var endgame = state.Max_rounds > 0 && state.Round >= state.Max_rounds - EndgameRounds;
         var recoveryMode = RecoveryRoundsRemaining > 0;
         var activeDemand = GetOutstandingCounts(active);
+        var activeOrderDemandSnapshot = GetOutstandingCounts(active);
         var previewDemand = preview == null ? new Dictionary<string, int>() : GetOutstandingCounts(preview);
+        var strategicPrefetchPlan = BuildStrategicPrefetchPlan(state, activeOrderDemandSnapshot);
+        var strategicPrefetchDemand = strategicPrefetchPlan.Budgets.Count == 0
+            ? new Dictionary<string, int>(StringComparer.Ordinal)
+            : new Dictionary<string, int>(strategicPrefetchPlan.Budgets, StringComparer.Ordinal);
         var initialActiveOutstanding = activeDemand.Values.Where(count => count > 0).Sum();
         var finishMode = initialActiveOutstanding <= 2;
+        var finishDemandSnapshot = finishMode
+            ? new Dictionary<string, int>(activeDemand, StringComparer.Ordinal)
+            : null;
+        var activeOrderTypes = activeOrderDemandSnapshot.Keys.ToHashSet(StringComparer.Ordinal);
+        var finishCarrierPresent = finishMode &&
+                                   finishDemandSnapshot != null &&
+                                   planningOrder.Any(bot => CountReliableMatchingInventory(bot, state, finishDemandSnapshot, deliveryTargets) > 0);
         var rolesByBotId = BuildRoleAssignments(state, planningOrder, active, preview, activeDemand, previewDemand, deliveryTargets, endgame, recoveryMode);
         var focusTypesByBotId = BuildActiveFocusAssignments(state, planningOrder, rolesByBotId, activeDemand);
+        var finishRedundancyPerType = finishMode
+            ? initialActiveOutstanding <= 1 ? 0 : 1
+            : 0;
+        var activeSupplyCaps = BuildActiveSupplyCaps(activeOrderDemandSnapshot, finishRedundancyPerType);
+        var committedActiveSupply = new Dictionary<string, int>(StringComparer.Ordinal);
+        var stalledActiveRecovery = !finishMode && ScoreStagnationRounds >= 25;
         var availableBots = new List<Bot>(planningOrder);
         var activeInventoryFlushesAssigned = 0;
+        var maxActiveInventoryFlushes = planningOrder.Count >= 18 ? 5 : 3;
 
         foreach (var bot in planningOrder)
         {
@@ -343,13 +384,36 @@ public partial class GroceryBotClient
             var role = rolesByBotId.GetValueOrDefault(bot.Id, "reserve");
             var currentActiveOutstanding = activeDemand.Values.Where(count => count > 0).Sum();
             var activeMatches = CountMatchingInventory(bot.Inventory, activeDemand);
+            var activeOrderMatches = CountMatchingInventory(bot.Inventory, activeOrderDemandSnapshot);
             var previewMatches = CountMatchingInventory(bot.Inventory, previewDemand);
+            var strategicPrefetchMatches = CountMatchingInventory(bot.Inventory, strategicPrefetchDemand);
+            var carriesForeignInventory = bot.Inventory.Any(carried => activeDemand.GetValueOrDefault(carried) <= 0);
+            var carriesOnlyStrategicPrefetch = strategicPrefetchMatches > 0 &&
+                                               bot.Inventory.All(carried => strategicPrefetchDemand.GetValueOrDefault(carried) > 0) &&
+                                               bot.Inventory.All(carried => activeOrderDemandSnapshot.GetValueOrDefault(carried) <= 0);
             var hasCapacityForActivePickup = bot.Inventory.Count < 3;
+            var desperateActiveRecovery =
+                !finishMode &&
+                planningOrder.Count >= 18 &&
+                currentActiveOutstanding >= 4 &&
+                planningOrder.Count(candidate => CountReliableMatchingInventory(candidate, state, activeDemand, deliveryTargets) > 0) == 0;
             var shouldFlushInventory = bot.Inventory.Count >= 3 ||
                                        StuckRounds.GetValueOrDefault(bot.Id) >= 3 ||
                                        (previewMatches > 0 && !hasCapacityForActivePickup);
             if (activeMatches > 0)
             {
+                var committedFromInventory = CommitSupplyAgainstCaps(bot.Inventory, activeSupplyCaps, committedActiveSupply);
+                if (committedFromInventory <= 0 && currentActiveOutstanding > 0)
+                {
+                    tasksByBotId[bot.Id] = new BotTask
+                    {
+                        Kind = "park",
+                        Target = GetBestParkingTarget(bot, state, deliveryTargets, tasksByBotId.Values.ToList())
+                    };
+                    availableBots.Remove(bot);
+                    continue;
+                }
+
                 if (role == "active_picker")
                 {
                     var continuePickupTask = TryAssignContinuedPickupTask(
@@ -363,6 +427,7 @@ public partial class GroceryBotClient
                     {
                         tasksByBotId[bot.Id] = continuePickupTask;
                         activeDemand[continuePickupTask.ItemType!] = activeDemand.GetValueOrDefault(continuePickupTask.ItemType!) - 1;
+                        CommitSupplyAgainstCaps([continuePickupTask.ItemType!], activeSupplyCaps, committedActiveSupply, 1);
                         ConsumeMatchingInventory(bot.Inventory, activeDemand);
                         availableBots.Remove(bot);
                         continue;
@@ -374,13 +439,160 @@ public partial class GroceryBotClient
                     Kind = "deliver",
                     Target = SelectDeliveryTarget(bot, state, deliveryTargets, tasksByBotId.Values.ToList())
                 };
-                ConsumeMatchingInventory(bot.Inventory, activeDemand);
+                ConsumeReliableMatchingInventory(bot, state, bot.Inventory, activeDemand, tasksByBotId[bot.Id].Target);
+                availableBots.Remove(bot);
+                continue;
+            }
+
+            if (role == "courier" && activeOrderMatches > 0)
+            {
+                var committedFromInventory = CommitSupplyAgainstCaps(bot.Inventory, activeSupplyCaps, committedActiveSupply);
+                if (committedFromInventory <= 0 && currentActiveOutstanding > 0)
+                {
+                    tasksByBotId[bot.Id] = new BotTask
+                    {
+                        Kind = "park",
+                        Target = GetBestParkingTarget(bot, state, deliveryTargets, tasksByBotId.Values.ToList())
+                    };
+                    availableBots.Remove(bot);
+                    continue;
+                }
+
+                tasksByBotId[bot.Id] = new BotTask
+                {
+                    Kind = "deliver",
+                    Target = SelectDeliveryTarget(bot, state, deliveryTargets, tasksByBotId.Values.ToList())
+                };
+                ConsumeReliableMatchingInventory(bot, state, bot.Inventory, activeDemand, tasksByBotId[bot.Id].Target);
+                availableBots.Remove(bot);
+                continue;
+            }
+
+            if (!finishMode && strategicPrefetchPlan.Enabled && carriesOnlyStrategicPrefetch)
+            {
+                tasksByBotId[bot.Id] = new BotTask
+                {
+                    Kind = "hold_preview",
+                    OrderId = strategicPrefetchPlan.TargetOrderId,
+                    Target = GetBestPreviewHoldTarget(bot, state, deliveryTargets, tasksByBotId.Values.ToList())
+                };
+                ConsumeMatchingInventory(bot.Inventory, strategicPrefetchDemand);
                 availableBots.Remove(bot);
                 continue;
             }
 
             if (role == "courier")
             {
+                if (finishMode &&
+                    !finishCarrierPresent &&
+                    currentActiveOutstanding > 0 &&
+                    carriesForeignInventory &&
+                    bot.Inventory.Count == 0)
+                {
+                    var finishRecoveryPickupTask = BuildFallbackActivePickupTask(
+                        bot,
+                        state,
+                        active,
+                        activeDemand,
+                        deliveryTargets,
+                        focusTypesByBotId.GetValueOrDefault(bot.Id),
+                        tasksByBotId.Values
+                            .Where(task => task.Target != null && task.Target.Length >= 2)
+                            .Select(task => (task.Target![0], task.Target[1]))
+                            .ToHashSet());
+                    if (finishRecoveryPickupTask != null)
+                    {
+                        tasksByBotId[bot.Id] = finishRecoveryPickupTask;
+                        if (!string.IsNullOrEmpty(finishRecoveryPickupTask.ItemType))
+                        {
+                            activeDemand[finishRecoveryPickupTask.ItemType!] =
+                                activeDemand.GetValueOrDefault(finishRecoveryPickupTask.ItemType!) - 1;
+                            CommitSupplyAgainstCaps([finishRecoveryPickupTask.ItemType!], activeSupplyCaps, committedActiveSupply, 1);
+                        }
+
+                        availableBots.Remove(bot);
+                        continue;
+                    }
+                }
+
+                if (desperateActiveRecovery && carriesForeignInventory && bot.Inventory.Count == 1)
+                {
+                    var recoveryPickupTask = BuildFallbackActivePickupTask(
+                        bot,
+                        state,
+                        active,
+                        activeDemand,
+                        deliveryTargets,
+                        focusTypesByBotId.GetValueOrDefault(bot.Id),
+                        tasksByBotId.Values
+                            .Where(task => task.Target != null && task.Target.Length >= 2)
+                            .Select(task => (task.Target![0], task.Target[1]))
+                            .ToHashSet());
+                    if (recoveryPickupTask != null)
+                    {
+                        tasksByBotId[bot.Id] = recoveryPickupTask;
+                        if (!string.IsNullOrEmpty(recoveryPickupTask.ItemType))
+                        {
+                            activeDemand[recoveryPickupTask.ItemType!] =
+                                activeDemand.GetValueOrDefault(recoveryPickupTask.ItemType!) - 1;
+                            CommitSupplyAgainstCaps([recoveryPickupTask.ItemType!], activeSupplyCaps, committedActiveSupply, 1);
+                        }
+
+                        availableBots.Remove(bot);
+                        continue;
+                    }
+                }
+
+                if (currentActiveOutstanding > 0 && carriesForeignInventory && activeOrderMatches <= 0)
+                {
+                    var shouldFlushForeignInventory =
+                        bot.Inventory.Count >= 3 ||
+                        StuckRounds.GetValueOrDefault(bot.Id) >= 2 ||
+                        activeInventoryFlushesAssigned < maxActiveInventoryFlushes;
+                    tasksByBotId[bot.Id] = new BotTask
+                    {
+                        Kind = shouldFlushForeignInventory ? "deliver" : "park",
+                        Target = shouldFlushForeignInventory
+                            ? SelectDeliveryTarget(bot, state, deliveryTargets, tasksByBotId.Values.ToList())
+                            : GetBestParkingTarget(bot, state, deliveryTargets, tasksByBotId.Values.ToList())
+                    };
+                    if (shouldFlushForeignInventory)
+                    {
+                        activeInventoryFlushesAssigned++;
+                    }
+
+                    availableBots.Remove(bot);
+                    continue;
+                }
+
+                if (currentActiveOutstanding > 0 && hasCapacityForActivePickup && bot.Inventory.Count == 0)
+                {
+                    var fallbackPickupTask = BuildFallbackActivePickupTask(
+                        bot,
+                        state,
+                        active,
+                        activeDemand,
+                        deliveryTargets,
+                        focusTypesByBotId.GetValueOrDefault(bot.Id),
+                        tasksByBotId.Values
+                            .Where(task => task.Target != null && task.Target.Length >= 2)
+                            .Select(task => (task.Target![0], task.Target[1]))
+                            .ToHashSet());
+                    if (fallbackPickupTask != null)
+                    {
+                        tasksByBotId[bot.Id] = fallbackPickupTask;
+                        if (!string.IsNullOrEmpty(fallbackPickupTask.ItemType))
+                        {
+                            activeDemand[fallbackPickupTask.ItemType!] =
+                                activeDemand.GetValueOrDefault(fallbackPickupTask.ItemType!) - 1;
+                            CommitSupplyAgainstCaps([fallbackPickupTask.ItemType!], activeSupplyCaps, committedActiveSupply, 1);
+                        }
+
+                        availableBots.Remove(bot);
+                        continue;
+                    }
+                }
+
                 if (finishMode && currentActiveOutstanding > 0 && activeMatches <= 0)
                 {
                     if (hasCapacityForActivePickup)
@@ -400,7 +612,7 @@ public partial class GroceryBotClient
                 var allowCourierFlush = currentActiveOutstanding <= 0 ||
                                         bot.Inventory.Count >= 3 ||
                                         StuckRounds.GetValueOrDefault(bot.Id) >= 3 ||
-                                        (!finishMode && activeInventoryFlushesAssigned < 2);
+                                        (!finishMode && activeInventoryFlushesAssigned < maxActiveInventoryFlushes);
                 if (currentActiveOutstanding > 0 && !allowCourierFlush)
                 {
                     continue;
@@ -415,6 +627,89 @@ public partial class GroceryBotClient
                 {
                     activeInventoryFlushesAssigned++;
                 }
+                ConsumeReliableMatchingInventory(bot, state, bot.Inventory, activeDemand, tasksByBotId[bot.Id].Target);
+                availableBots.Remove(bot);
+                continue;
+            }
+
+            if (currentActiveOutstanding > 0 && carriesForeignInventory)
+            {
+                if (finishMode &&
+                    !finishCarrierPresent &&
+                    bot.Inventory.Count == 0)
+                {
+                    var finishRecoveryPickupTask = BuildFallbackActivePickupTask(
+                        bot,
+                        state,
+                        active,
+                        activeDemand,
+                        deliveryTargets,
+                        focusTypesByBotId.GetValueOrDefault(bot.Id),
+                        tasksByBotId.Values
+                            .Where(task => task.Target != null && task.Target.Length >= 2)
+                            .Select(task => (task.Target![0], task.Target[1]))
+                            .ToHashSet());
+                    if (finishRecoveryPickupTask != null)
+                    {
+                        tasksByBotId[bot.Id] = finishRecoveryPickupTask;
+                        if (!string.IsNullOrEmpty(finishRecoveryPickupTask.ItemType))
+                        {
+                            activeDemand[finishRecoveryPickupTask.ItemType!] =
+                                activeDemand.GetValueOrDefault(finishRecoveryPickupTask.ItemType!) - 1;
+                            CommitSupplyAgainstCaps([finishRecoveryPickupTask.ItemType!], activeSupplyCaps, committedActiveSupply, 1);
+                        }
+
+                        availableBots.Remove(bot);
+                        continue;
+                    }
+                }
+
+                if (desperateActiveRecovery && bot.Inventory.Count == 1)
+                {
+                    var recoveryPickupTask = BuildFallbackActivePickupTask(
+                        bot,
+                        state,
+                        active,
+                        activeDemand,
+                        deliveryTargets,
+                        focusTypesByBotId.GetValueOrDefault(bot.Id),
+                        tasksByBotId.Values
+                            .Where(task => task.Target != null && task.Target.Length >= 2)
+                            .Select(task => (task.Target![0], task.Target[1]))
+                            .ToHashSet());
+                    if (recoveryPickupTask != null)
+                    {
+                        tasksByBotId[bot.Id] = recoveryPickupTask;
+                        if (!string.IsNullOrEmpty(recoveryPickupTask.ItemType))
+                        {
+                            activeDemand[recoveryPickupTask.ItemType!] =
+                                activeDemand.GetValueOrDefault(recoveryPickupTask.ItemType!) - 1;
+                            CommitSupplyAgainstCaps([recoveryPickupTask.ItemType!], activeSupplyCaps, committedActiveSupply, 1);
+                        }
+
+                        availableBots.Remove(bot);
+                        continue;
+                    }
+                }
+
+                var shouldFlushForeignInventory =
+                    bot.Inventory.Count >= 3 ||
+                    StuckRounds.GetValueOrDefault(bot.Id) >= 2 ||
+                    activeInventoryFlushesAssigned < maxActiveInventoryFlushes;
+                tasksByBotId[bot.Id] = new BotTask
+                {
+                    Kind = shouldFlushForeignInventory ? "deliver" : role == "reserve" ? "park" : "stage",
+                    Target = shouldFlushForeignInventory
+                        ? SelectDeliveryTarget(bot, state, deliveryTargets, tasksByBotId.Values.ToList())
+                        : role == "reserve"
+                            ? GetBestParkingTarget(bot, state, deliveryTargets, tasksByBotId.Values.ToList())
+                            : GetBestStageTarget(bot, state, deliveryTargets, tasksByBotId.Values.ToList(), endgame)
+                };
+                if (shouldFlushForeignInventory)
+                {
+                    activeInventoryFlushesAssigned++;
+                }
+
                 availableBots.Remove(bot);
                 continue;
             }
@@ -448,6 +743,7 @@ public partial class GroceryBotClient
                 {
                     activeInventoryFlushesAssigned++;
                 }
+                ConsumeReliableMatchingInventory(bot, state, bot.Inventory, activeDemand, tasksByBotId[bot.Id].Target);
                 availableBots.Remove(bot);
                 continue;
             }
@@ -468,6 +764,9 @@ public partial class GroceryBotClient
         var activePickers = availableBots
             .Where(bot => rolesByBotId.GetValueOrDefault(bot.Id, "reserve") == "active_picker")
             .ToList();
+        activePickers = activePickers
+            .Where(bot => bot.Inventory.Count == 0 || bot.Inventory.All(carried => activeDemand.GetValueOrDefault(carried) > 0))
+            .ToList();
         var focusedActiveAssignments = AssignFocusedPickupTasks(activePickers, state, active, activeDemand, deliveryTargets, focusTypesByBotId);
         foreach (var pair in focusedActiveAssignments)
         {
@@ -477,6 +776,7 @@ public partial class GroceryBotClient
 
         activePickers = availableBots
             .Where(bot => rolesByBotId.GetValueOrDefault(bot.Id, "reserve") == "active_picker")
+            .Where(bot => bot.Inventory.Count == 0 || bot.Inventory.All(carried => activeDemand.GetValueOrDefault(carried) > 0))
             .ToList();
         var activeAssignments = AssignPickupTasks(activePickers, state, active, activeDemand, deliveryTargets, "pickup_active", int.MaxValue, focusTypesByBotId);
         foreach (var pair in activeAssignments)
@@ -489,6 +789,7 @@ public partial class GroceryBotClient
         if (finishMode && activeOutstanding > 0)
         {
             var finishBots = availableBots
+                .Where(bot => rolesByBotId.GetValueOrDefault(bot.Id, "reserve") != "preview_picker")
                 .Where(bot => bot.Inventory.Count < 3)
                 .OrderBy(bot => rolesByBotId.GetValueOrDefault(bot.Id, "reserve") == "active_picker" ? 0 : 1)
                 .ThenBy(bot => rolesByBotId.GetValueOrDefault(bot.Id, "reserve") == "buffer" ? 0 : 1)
@@ -511,19 +812,19 @@ public partial class GroceryBotClient
 
             // In finish mode, one assigned picker can get trapped behind congestion.
             // Add redundant same-type claims for the final 1-2 active items.
-            var remainingFinishDemand = GetOutstandingCounts(active);
-            foreach (var task in tasksByBotId.Values.Where(task => task.Kind == "pickup_active" && !string.IsNullOrEmpty(task.ItemType)))
-            {
-                remainingFinishDemand[task.ItemType!] = Math.Max(0, remainingFinishDemand.GetValueOrDefault(task.ItemType!) - 1);
-            }
-
-            var unresolvedFinishTypes = remainingFinishDemand
+            var assignedFinishPickupCounts = tasksByBotId.Values
+                .Where(task => task.Kind == "pickup_active" && !string.IsNullOrEmpty(task.ItemType))
+                .GroupBy(task => task.ItemType!, StringComparer.Ordinal)
+                .ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal);
+            var redundantFinishTypes = (finishDemandSnapshot ?? GetOutstandingCounts(active))
                 .Where(pair => pair.Value > 0)
+                .Where(pair => assignedFinishPickupCounts.GetValueOrDefault(pair.Key) < 2)
                 .Select(pair => pair.Key)
                 .ToHashSet(StringComparer.Ordinal);
-            if (unresolvedFinishTypes.Count > 0)
+            if (redundantFinishTypes.Count > 0)
             {
                 var redundantBots = availableBots
+                    .Where(bot => rolesByBotId.GetValueOrDefault(bot.Id, "reserve") != "preview_picker")
                     .Where(bot => bot.Inventory.Count < 3)
                     .OrderBy(bot => StuckRounds.GetValueOrDefault(bot.Id))
                     .ThenBy(bot => bot.Id)
@@ -533,7 +834,7 @@ public partial class GroceryBotClient
                     state,
                     active,
                     deliveryTargets,
-                    unresolvedFinishTypes,
+                    redundantFinishTypes,
                     tasksByBotId.Values.ToList(),
                     focusTypesByBotId);
                 foreach (var pair in redundantAssignments)
@@ -542,6 +843,44 @@ public partial class GroceryBotClient
                     availableBots.RemoveAll(bot => bot.Id == pair.Key);
                 }
             }
+        }
+
+        activeOutstanding = activeDemand.Values.Where(count => count > 0).Sum();
+        if (finishMode && activeOutstanding > 0)
+        {
+            var finishReliableCarriers = planningOrder.Count(bot =>
+                CountReliableMatchingInventory(bot, state, activeDemand, deliveryTargets) > 0);
+            var assignedFinishPickups = tasksByBotId.Values.Count(task => task.Kind == "pickup_active");
+            if (finishReliableCarriers == 0 && assignedFinishPickups == 0)
+            {
+                var forcedFinishDemand = new Dictionary<string, int>(activeOrderDemandSnapshot, StringComparer.Ordinal);
+                var forcedFinishBots = availableBots
+                    .Where(bot => rolesByBotId.GetValueOrDefault(bot.Id, "reserve") != "preview_picker")
+                    .Where(bot => bot.Inventory.Count == 0)
+                    .OrderBy(bot => rolesByBotId.GetValueOrDefault(bot.Id, "reserve") == "active_picker" ? 0 : 1)
+                    .ThenBy(bot => rolesByBotId.GetValueOrDefault(bot.Id, "reserve") == "buffer" ? 0 : 1)
+                    .ThenBy(bot => bot.Id)
+                    .ToList();
+                var forcedFinishAssignments = AssignPickupTasks(
+                    forcedFinishBots,
+                    state,
+                    active,
+                    forcedFinishDemand,
+                    deliveryTargets,
+                    "pickup_active",
+                    Math.Min(Math.Min(activeOutstanding, 2), forcedFinishBots.Count),
+                    focusTypesByBotId);
+                foreach (var pair in forcedFinishAssignments)
+                {
+                    tasksByBotId[pair.Key] = pair.Value;
+                    availableBots.RemoveAll(bot => bot.Id == pair.Key);
+                }
+            }
+        }
+
+        if (finishMode && finishDemandSnapshot != null)
+        {
+            LogFinishModeAssignments(state, tasksByBotId, rolesByBotId, finishDemandSnapshot);
         }
 
         activeOutstanding = activeDemand.Values.Where(count => count > 0).Sum();
@@ -562,7 +901,9 @@ public partial class GroceryBotClient
         var extraPickers = availableBots
             .Where(bot =>
                 rolesByBotId.GetValueOrDefault(bot.Id, "reserve") != "reserve" &&
-                bot.Inventory.Count < 3)
+                rolesByBotId.GetValueOrDefault(bot.Id, "reserve") != "preview_picker" &&
+                bot.Inventory.Count < 3 &&
+                (bot.Inventory.Count == 0 || bot.Inventory.All(carried => activeDemand.GetValueOrDefault(carried) > 0)))
             .ToList();
         if (!finishMode && extraPickers.Count > 0 && activeOutstanding > 0)
         {
@@ -604,10 +945,49 @@ public partial class GroceryBotClient
         }
 
         activeOutstanding = activeDemand.Values.Where(count => count > 0).Sum();
+        var reliableActiveCarriers = planningOrder.Count(bot => CountReliableMatchingInventory(bot, state, activeDemand, deliveryTargets) > 0);
+        var targetReliableCarrierCount = Math.Min(
+            activeOutstanding,
+            planningOrder.Count >= 18 ? 4 : 3);
+        var undercoveredActiveRecovery = reliableActiveCarriers <= Math.Max(1, activeOutstanding / 3);
+        if (!finishMode &&
+            availableBots.Count > 0 &&
+            activeOutstanding > 0 &&
+            (reliableActiveCarriers < targetReliableCarrierCount || stalledActiveRecovery))
+        {
+            var recoveryDemand = (stalledActiveRecovery || undercoveredActiveRecovery)
+                ? new Dictionary<string, int>(activeOrderDemandSnapshot, StringComparer.Ordinal)
+                : activeDemand;
+            var recoveryPickupBots = availableBots
+                .Where(bot => bot.Inventory.Count == 0)
+                .OrderBy(bot => rolesByBotId.GetValueOrDefault(bot.Id, "reserve") == "active_picker" ? 0 : 1)
+                .ThenBy(bot => bot.Id)
+                .ToList();
+            var recoveryPickups = AssignPickupTasks(
+                recoveryPickupBots,
+                state,
+                active,
+                recoveryDemand,
+                deliveryTargets,
+                "pickup_active",
+                Math.Min(
+                    Math.Max(1, stalledActiveRecovery ? Math.Min(activeOutstanding, 3) : targetReliableCarrierCount - reliableActiveCarriers),
+                    recoveryPickupBots.Count),
+                focusTypesByBotId);
+            foreach (var pair in recoveryPickups)
+            {
+                tasksByBotId[pair.Key] = pair.Value;
+                availableBots.RemoveAll(bot => bot.Id == pair.Key);
+            }
+        }
+
+        activeOutstanding = activeDemand.Values.Where(count => count > 0).Sum();
         if (!finishMode && availableBots.Count > 0 && activeOutstanding > 0)
         {
             var extraSupportBots = availableBots
-                .Where(bot => rolesByBotId.GetValueOrDefault(bot.Id, "reserve") != "reserve")
+                .Where(bot =>
+                    rolesByBotId.GetValueOrDefault(bot.Id, "reserve") != "reserve" &&
+                    rolesByBotId.GetValueOrDefault(bot.Id, "reserve") != "preview_picker")
                 .ToList();
             var extraSupportAssignments = AssignActiveSupportTasks(
                 extraSupportBots,
@@ -645,31 +1025,124 @@ public partial class GroceryBotClient
             }
         }
 
+        activeOutstanding = activeDemand.Values.Where(count => count > 0).Sum();
+        if (!finishMode && availableBots.Count > 0 && activeOutstanding > 0 && undercoveredActiveRecovery)
+        {
+            var forcedRecoveryBots = availableBots
+                .Where(bot => rolesByBotId.GetValueOrDefault(bot.Id, "reserve") != "preview_picker")
+                .Where(bot => bot.Inventory.Count == 0)
+                .OrderBy(bot => rolesByBotId.GetValueOrDefault(bot.Id, "reserve") == "active_picker" ? 0 : 1)
+                .ThenBy(bot => rolesByBotId.GetValueOrDefault(bot.Id, "reserve") == "buffer" ? 0 : 1)
+                .ThenBy(bot => bot.Id)
+                .ToList();
+            if (forcedRecoveryBots.Count > 0)
+            {
+                var forcedRecoveryAssignments = AssignPickupTasks(
+                    forcedRecoveryBots,
+                    state,
+                    active,
+                    new Dictionary<string, int>(activeOrderDemandSnapshot, StringComparer.Ordinal),
+                    deliveryTargets,
+                    "pickup_active",
+                    Math.Min(Math.Min(activeOutstanding, 2), forcedRecoveryBots.Count),
+                    focusTypesByBotId);
+                foreach (var pair in forcedRecoveryAssignments)
+                {
+                    tasksByBotId[pair.Key] = pair.Value;
+                    availableBots.RemoveAll(bot => bot.Id == pair.Key);
+                }
+            }
+        }
+
+        if (!finishMode && strategicPrefetchPlan.Enabled && availableBots.Count > 0)
+        {
+            var prefetchBots = availableBots
+                .Where(bot => rolesByBotId.GetValueOrDefault(bot.Id, "reserve") == "preview_picker")
+                .Where(bot => bot.Inventory.Count == 0)
+                .OrderBy(bot => bot.Id)
+                .ToList();
+            if (prefetchBots.Count > 0 && strategicPrefetchDemand.Values.Any(count => count > 0))
+            {
+                var syntheticPrefetchOrder = new Order
+                {
+                    Id = strategicPrefetchPlan.TargetOrderId ?? "planned_order",
+                    Items_required = ExpandCounts(strategicPrefetchDemand).ToList(),
+                    Status = "planned"
+                };
+                var prefetchAssignments = AssignPickupTasks(
+                    prefetchBots,
+                    state,
+                    syntheticPrefetchOrder,
+                    strategicPrefetchDemand,
+                    deliveryTargets,
+                    "pickup_preview",
+                    Math.Min(2, prefetchBots.Count));
+                foreach (var pair in prefetchAssignments)
+                {
+                    tasksByBotId[pair.Key] = pair.Value;
+                    availableBots.RemoveAll(bot => bot.Id == pair.Key);
+                }
+            }
+        }
+
         var assignedTasks = tasksByBotId.Values.ToList();
         foreach (var bot in availableBots)
         {
             var role = rolesByBotId.GetValueOrDefault(bot.Id, "reserve");
             var dynamicActiveOutstanding = activeDemand.Values.Where(count => count > 0).Sum();
+            var finishRecoveryDemand = finishMode && dynamicActiveOutstanding > 0
+                ? new Dictionary<string, int>(activeOrderDemandSnapshot, StringComparer.Ordinal)
+                : activeDemand;
+            var dynamicFinishCarrierPresent = finishMode &&
+                                              planningOrder.Any(candidate =>
+                                                  CountReliableMatchingInventory(candidate, state, finishRecoveryDemand, deliveryTargets) > 0);
             var reservedTargets = assignedTasks
                 .Where(task => task.Target != null && task.Target.Length >= 2)
                 .Select(task => (task.Target![0], task.Target[1]))
                 .ToHashSet();
-            var fallbackPickupTask = dynamicActiveOutstanding > 0 && bot.Inventory.Count < 3
+            var allowActiveFallback = role != "preview_picker";
+            var fallbackPickupTask = allowActiveFallback && dynamicActiveOutstanding > 0 && bot.Inventory.Count < 3
                 ? BuildFallbackActivePickupTask(
                     bot,
                     state,
                     active,
-                    activeDemand,
+                    finishMode && !dynamicFinishCarrierPresent
+                        ? finishRecoveryDemand
+                        : !finishMode && undercoveredActiveRecovery
+                            ? new Dictionary<string, int>(activeOrderDemandSnapshot, StringComparer.Ordinal)
+                            : activeDemand,
                     deliveryTargets,
                     focusTypesByBotId.GetValueOrDefault(bot.Id),
                     reservedTargets)
                 : null;
+            if (finishMode && dynamicFinishCarrierPresent && fallbackPickupTask == null)
+            {
+                tasksByBotId[bot.Id] = new BotTask
+                {
+                    Kind = "park",
+                    Target = GetBestParkingTarget(bot, state, deliveryTargets, assignedTasks)
+                };
+                assignedTasks.Add(tasksByBotId[bot.Id]);
+                continue;
+            }
+
             tasksByBotId[bot.Id] = role switch
             {
                 "courier" => new BotTask
                 {
-                    Kind = "stage",
-                    Target = GetBestCourierQueueTarget(bot, state, deliveryTargets, assignedTasks)
+                    Kind = fallbackPickupTask?.Kind ?? (dynamicActiveOutstanding > 0 ? "support_active" : "stage"),
+                    OrderId = fallbackPickupTask?.OrderId,
+                    ItemId = fallbackPickupTask?.ItemId,
+                    ItemType = fallbackPickupTask?.ItemType,
+                    Target = fallbackPickupTask?.Target ?? (dynamicActiveOutstanding > 0
+                        ? GetBestActiveSupportTarget(
+                            bot,
+                            state,
+                            activeDemand,
+                            deliveryTargets,
+                            reservedTargets,
+                            focusTypesByBotId.GetValueOrDefault(bot.Id)) ?? GetBestCourierQueueTarget(bot, state, deliveryTargets, assignedTasks)
+                        : GetBestCourierQueueTarget(bot, state, deliveryTargets, assignedTasks))
                 },
                 "buffer" => new BotTask
                 {
@@ -685,19 +1158,17 @@ public partial class GroceryBotClient
                         reservedTargets,
                         focusTypesByBotId.GetValueOrDefault(bot.Id)) ?? GetBestStageTarget(bot, state, deliveryTargets, assignedTasks, endgame)
                 },
-                "preview_picker" when preview != null => new BotTask
+                "preview_picker" => new BotTask
                 {
-                    Kind = fallbackPickupTask?.Kind ?? "support_active",
+                    Kind = bot.Inventory.Count > 0 && CountMatchingInventory(bot.Inventory, strategicPrefetchDemand) > 0
+                        ? "hold_preview"
+                        : "stage",
                     OrderId = fallbackPickupTask?.OrderId,
                     ItemId = fallbackPickupTask?.ItemId,
                     ItemType = fallbackPickupTask?.ItemType,
-                    Target = fallbackPickupTask?.Target ?? GetBestActiveSupportTarget(
-                        bot,
-                        state,
-                        activeDemand,
-                        deliveryTargets,
-                        reservedTargets,
-                        focusTypesByBotId.GetValueOrDefault(bot.Id)) ?? GetBestStageTarget(bot, state, deliveryTargets, assignedTasks, endgame)
+                    Target = bot.Inventory.Count > 0 && CountMatchingInventory(bot.Inventory, strategicPrefetchDemand) > 0
+                        ? GetBestPreviewHoldTarget(bot, state, deliveryTargets, assignedTasks)
+                        : GetBestStageTarget(bot, state, deliveryTargets, assignedTasks, endgame)
                 },
                 "active_picker" => new BotTask
                 {
@@ -748,19 +1219,37 @@ public partial class GroceryBotClient
 
         var teamSize = planningOrder.Count;
         var activeOutstanding = activeDemand.Values.Where(count => count > 0).Sum();
-        var carryingActive = planningOrder.Count(bot => CountMatchingInventory(bot.Inventory, activeDemand) > 0);
-        var hasPreview = false;
+        var carryingActive = planningOrder.Count(bot => CountReliableMatchingInventory(bot, state, activeDemand, deliveryTargets) > 0);
+        var previewOutstanding = previewDemand.Values.Where(count => count > 0).Sum();
+        var strategicPrefetchPlan = BuildStrategicPrefetchPlan(state, activeDemand);
+        var hasPreview = preview != null &&
+                         previewOutstanding > 0 &&
+                         activeOutstanding <= 0 &&
+                         carryingActive <= 0 &&
+                         !recoveryMode &&
+                         !endgame;
+        var hasStrategicPrefetch = strategicPrefetchPlan.Enabled &&
+                                   !recoveryMode &&
+                                   !endgame;
         var baseCourierCap = teamSize >= 18
             ? 3
             : 2;
         var adaptiveCourierCap = carryingActive >= Math.Max(4, teamSize / 4)
             ? baseCourierCap + 1
             : baseCourierCap;
+        var deliveryPressureBonus = activeOutstanding > 0 && carryingActive >= Math.Max(3, activeOutstanding)
+            ? 1
+            : 0;
+        var previewCap = hasPreview
+            ? Math.Clamp(teamSize / 10, 1, 2)
+            : hasStrategicPrefetch
+                ? Math.Clamp(Math.Min(strategicPrefetchPlan.Budgets.Values.Sum(), 2), 1, 2)
+                : 0;
         var caps = new Dictionary<string, int>
         {
-            ["courier"] = Math.Clamp(adaptiveCourierCap + (activeOutstanding <= 2 ? 1 : 0), 2, 5),
+            ["courier"] = Math.Clamp(adaptiveCourierCap + (activeOutstanding <= 2 ? 1 : 0) + deliveryPressureBonus, 2, 6),
             ["active_picker"] = Math.Clamp(Math.Max(6, teamSize / 2 - 1 + (activeOutstanding >= 6 ? 1 : 0)), 6, 10),
-            ["preview_picker"] = 0,
+            ["preview_picker"] = previewCap,
             ["buffer"] = Math.Clamp(teamSize / 7, 2, 3)
         };
         if (endgame)
@@ -840,7 +1329,7 @@ public partial class GroceryBotClient
                 continue;
             }
 
-            if (existing.Role == "preview_picker" && !hasPreview)
+            if (existing.Role == "preview_picker" && !hasPreview && !hasStrategicPrefetch)
             {
                 continue;
             }
@@ -898,11 +1387,21 @@ public partial class GroceryBotClient
             }
         }
 
-        if (hasPreview)
+        if (hasPreview || hasStrategicPrefetch)
         {
+            var previewRoleDemand = hasPreview
+                ? previewDemand
+                : strategicPrefetchPlan.Budgets;
             foreach (var bot in planningOrder
                          .Where(bot => !rolesByBotId.ContainsKey(bot.Id))
-                         .OrderByDescending(bot => CountMatchingInventory(bot.Inventory, previewDemand))
+                         .Where(bot => hasPreview || bot.Inventory.Count == 0)
+                         .OrderByDescending(bot => CountMatchingInventory(bot.Inventory, previewRoleDemand))
+                         .ThenBy(bot => state.Items
+                             .Where(item => previewRoleDemand.GetValueOrDefault(item.Type) > 0)
+                             .Select(item => GetPathDistance(bot.Position, item.Position, state))
+                             .DefaultIfEmpty(int.MaxValue)
+                             .Min())
+                         .ThenByDescending(bot => bot.Inventory.Count)
                          .ThenBy(bot => bot.Id))
             {
                 if (!TryAssignRole(bot, "preview_picker"))
@@ -962,6 +1461,19 @@ public partial class GroceryBotClient
             true,
             preferredItemType,
             reservedTargets);
+        if (candidate == null && reservedTargets.Count > 0)
+        {
+            candidate = FindBestPickupCandidate(
+                bot,
+                state.Items,
+                activeDemand,
+                state,
+                deliveryTargets,
+                [],
+                true,
+                preferredItemType,
+                []);
+        }
         if (candidate == null)
         {
             RecentFallbackPickupNoCandidate++;
@@ -1086,6 +1598,19 @@ public partial class GroceryBotClient
                 true,
                 preferredType,
                 reservedTargets);
+            if (candidate == null && reservedTargets.Count > 0)
+            {
+                candidate = FindBestPickupCandidate(
+                    bot,
+                    state.Items.Where(item => unresolvedTypes.Contains(item.Type)),
+                    unresolvedTypes.ToDictionary(type => type, _ => 1, StringComparer.Ordinal),
+                    state,
+                    deliveryTargets,
+                    usedItemIds,
+                    true,
+                    preferredType,
+                    []);
+            }
             if (candidate == null)
             {
                 continue;
@@ -1129,6 +1654,8 @@ public partial class GroceryBotClient
             return focusesByBotId;
         }
 
+        var strategicProfile = BuildStrategicDemandProfile(state);
+
         foreach (var bot in planningOrder)
         {
             var role = rolesByBotId.GetValueOrDefault(bot.Id, "reserve");
@@ -1152,9 +1679,11 @@ public partial class GroceryBotClient
                         .Where(item => string.Equals(item.Type, type, StringComparison.Ordinal))
                         .Select(item => GetPathDistance(bot.Position, item.Position, state))
                         .DefaultIfEmpty(int.MaxValue)
-                        .Min()
+                        .Min(),
+                    StrategicWeight = strategicProfile.WeightedDemand.GetValueOrDefault(type)
                 })
                 .OrderBy(candidate => candidate.Distance)
+                .ThenByDescending(candidate => candidate.StrategicWeight)
                 .ThenByDescending(candidate => activeDemand.GetValueOrDefault(candidate.Type))
                 .ThenBy(candidate => candidate.Type, StringComparer.Ordinal)
                 .Select(candidate => candidate.Type)
@@ -1311,9 +1840,29 @@ public partial class GroceryBotClient
             return null;
         }
 
+        var activeOutstanding = activeDemand.Values.Where(count => count > 0).Sum();
+        if (ScoreStagnationRounds >= 25 || activeOutstanding <= 3)
+        {
+            return null;
+        }
+
+        var carriedActiveMatches = CountMatchingInventory(bot.Inventory, activeDemand);
+        if (carriedActiveMatches <= 0)
+        {
+            return null;
+        }
+
         var remainingDemand = new Dictionary<string, int>(activeDemand, StringComparer.Ordinal);
         ConsumeMatchingInventory(bot.Inventory, remainingDemand);
         if (remainingDemand.Values.All(count => count <= 0))
+        {
+            return null;
+        }
+
+        // Once a bot is already carrying one or more active items, chaining more pickups
+        // too aggressively creates late mixed inventories that never convert into score.
+        // Only allow a continuation pickup for a clean single-item load.
+        if (carriedActiveMatches > 1 || bot.Inventory.Count != carriedActiveMatches)
         {
             return null;
         }
@@ -1345,7 +1894,7 @@ public partial class GroceryBotClient
         }
 
         var pickupThenDeliverDistance = candidate.PickupDistance + candidate.DeliveryDistance;
-        var allowedDetour = 4 + ((3 - bot.Inventory.Count) * 2);
+        var allowedDetour = 2;
         if (pickupThenDeliverDistance > directDeliveryDistance + allowedDetour)
         {
             return null;
@@ -1469,12 +2018,14 @@ public partial class GroceryBotClient
     {
         if (string.IsNullOrEmpty(task.ItemId))
         {
+            PickupProgressByBotId.Remove(bot.Id);
             return CreateResponse(bot.Id, "wait");
         }
 
         var item = state.Items.FirstOrDefault(candidate => candidate.Id == task.ItemId);
         if (item == null)
         {
+            PickupProgressByBotId.Remove(bot.Id);
             return CreateResponse(bot.Id, "wait");
         }
 
@@ -1484,21 +2035,136 @@ public partial class GroceryBotClient
             if (distance == 1)
             {
                 PickupAccessTargets.Remove(bot.Id);
+                PickupProgressByBotId.Remove(bot.Id);
                 return CreateResponse(bot.Id, "pick_up", item.Id);
             }
         }
 
-        var target = task.Target != null && task.Target.Length >= 2 && IsAccessiblePickupTarget(bot, task.Target, state, planningContext)
+        var forceRetarget = StuckRounds.GetValueOrDefault(bot.Id) >= 3;
+        if (forceRetarget)
+        {
+            PickupAccessTargets.Remove(bot.Id);
+        }
+
+        var target = !forceRetarget &&
+                     task.Target != null &&
+                     task.Target.Length >= 2 &&
+                     IsAccessiblePickupTarget(bot, task.Target, state, planningContext)
             ? task.Target
             : GetPickupAccessTarget(bot, item, state, planningContext);
         if (target == null)
         {
             PickupAccessTargets.Remove(bot.Id);
+            PickupProgressByBotId.Remove(bot.Id);
             return CreateResponse(bot.Id, FindRecoveryAction(bot, state, planningContext.OccupiedPositions, []));
         }
 
+        var pickupStagnation = TrackPickupProgress(bot, item, target, state);
+        if (pickupStagnation >= 6)
+        {
+            PickupAccessTargets.Remove(bot.Id);
+            var alternateTarget = GetPickupAccessTarget(bot, item, state, planningContext);
+            if (alternateTarget != null &&
+                (alternateTarget[0] != target[0] || alternateTarget[1] != target[1]))
+            {
+                target = alternateTarget;
+                pickupStagnation = TrackPickupProgress(bot, item, target, state);
+            }
+        }
+
         planningContext.ReservedTargets.Add((target[0], target[1]));
-        return ExecuteMoveTask(bot, state, planningContext, target, false, task.Kind);
+        var response = pickupStagnation >= 10
+            ? MoveToward(bot, state, target, [])
+            : ExecuteMoveTask(bot, state, planningContext, target, false, task.Kind);
+        if (pickupStagnation >= 10)
+        {
+            LogMoveDiagnostics(bot, state, target, response.Actions[0].Action, $"{task.Kind}:unstick");
+        }
+
+        if (response.Actions[0].Action != "wait")
+        {
+            return response;
+        }
+
+        PickupAccessTargets.Remove(bot.Id);
+        if (StuckRounds.GetValueOrDefault(bot.Id) >= 2)
+        {
+            var alternateTarget = GetPickupAccessTarget(bot, item, state, planningContext);
+            if (alternateTarget != null &&
+                (alternateTarget[0] != target[0] || alternateTarget[1] != target[1]))
+            {
+                planningContext.ReservedTargets.Add((alternateTarget[0], alternateTarget[1]));
+                var rerouteResponse = ExecuteMoveTask(bot, state, planningContext, alternateTarget, false, $"{task.Kind}:reroute");
+                if (rerouteResponse.Actions[0].Action != "wait")
+                {
+                    return rerouteResponse;
+                }
+            }
+        }
+
+        var recoveryAction = FindRecoveryAction(bot, state, planningContext.OccupiedPositions, target);
+        if (recoveryAction != "wait")
+        {
+            LogMoveDiagnostics(bot, state, target, recoveryAction, $"{task.Kind}:recover");
+            return CreateResponse(bot.Id, recoveryAction);
+        }
+
+        return response;
+    }
+
+    private static int TrackPickupProgress(Bot bot, Item item, int[] target, GameState state)
+    {
+        if (target.Length < 2)
+        {
+            PickupProgressByBotId.Remove(bot.Id);
+            return 0;
+        }
+
+        var distance = GetPathDistance(bot.Position, target, state);
+        if (distance == int.MaxValue)
+        {
+            distance = GetHeuristicDistance(bot.Position, target);
+        }
+
+        if (!PickupProgressByBotId.TryGetValue(bot.Id, out var previous) ||
+            !string.Equals(previous.ItemId, item.Id, StringComparison.Ordinal) ||
+            previous.TargetX != target[0] ||
+            previous.TargetY != target[1])
+        {
+            PickupProgressByBotId[bot.Id] = new PickupProgress
+            {
+                ItemId = item.Id,
+                TargetX = target[0],
+                TargetY = target[1],
+                BestDistance = distance,
+                StagnantRounds = 0
+            };
+            return 0;
+        }
+
+        if (distance < previous.BestDistance)
+        {
+            PickupProgressByBotId[bot.Id] = new PickupProgress
+            {
+                ItemId = item.Id,
+                TargetX = target[0],
+                TargetY = target[1],
+                BestDistance = distance,
+                StagnantRounds = 0
+            };
+            return 0;
+        }
+
+        var next = new PickupProgress
+        {
+            ItemId = item.Id,
+            TargetX = target[0],
+            TargetY = target[1],
+            BestDistance = previous.BestDistance,
+            StagnantRounds = previous.StagnantRounds + 1
+        };
+        PickupProgressByBotId[bot.Id] = next;
+        return next.StagnantRounds;
     }
 
     private static BotResponse ExecuteParkTask(
@@ -1554,6 +2220,7 @@ public partial class GroceryBotClient
         if (action.Action == "pick_up")
         {
             PickupAccessTargets.Remove(bot.Id);
+            PickupProgressByBotId.Remove(bot.Id);
             return;
         }
 
@@ -1570,6 +2237,7 @@ public partial class GroceryBotClient
         {
             CourierRoutes.Remove(bot.Id);
             CourierTargets.Remove(bot.Id);
+            DeliveryProgressByBotId.Remove(bot.Id);
         }
     }
 
@@ -1680,6 +2348,97 @@ public partial class GroceryBotClient
         return matches;
     }
 
+    private static int CountReliableMatchingInventory(IEnumerable<string> inventory, Dictionary<string, int> neededCounts)
+    {
+        var remaining = new Dictionary<string, int>(neededCounts, StringComparer.Ordinal);
+        var matches = 0;
+
+        foreach (var carried in inventory)
+        {
+            if (remaining.GetValueOrDefault(carried) <= 0)
+            {
+                return 0;
+            }
+
+            remaining[carried]--;
+            matches++;
+        }
+
+        return matches;
+    }
+
+    private static int CountReliableMatchingInventory(
+        Bot bot,
+        GameState state,
+        Dictionary<string, int> neededCounts,
+        List<int[]> deliveryTargets)
+    {
+        if (bot.Inventory.Count == 0 || neededCounts.Count == 0)
+        {
+            return 0;
+        }
+
+        var matchingItems = bot.Inventory
+            .Where(carried => neededCounts.GetValueOrDefault(carried) > 0)
+            .ToList();
+        if (matchingItems.Count == 0)
+        {
+            return 0;
+        }
+
+        if (bot.Inventory.Any(carried => neededCounts.GetValueOrDefault(carried) <= 0))
+        {
+            return 0;
+        }
+
+        var deliveryTarget = GetBestTarget(bot.Position, deliveryTargets, state);
+        var deliveryDistance = deliveryTarget.Length >= 2
+            ? GetPathDistance(bot.Position, deliveryTarget, state)
+            : int.MaxValue;
+        if (deliveryDistance == int.MaxValue)
+        {
+            return 0;
+        }
+
+        var stuckRounds = StuckRounds.GetValueOrDefault(bot.Id);
+        var totalNeeded = neededCounts.Values.Where(count => count > 0).Sum();
+        var neededTypeCount = neededCounts.Count(pair => pair.Value > 0);
+        var strictSingleTypeFinish = totalNeeded <= 1 ||
+                                     (ScoreStagnationRounds >= 12 && neededTypeCount == 1 && totalNeeded <= 2);
+
+        if (strictSingleTypeFinish)
+        {
+            if (deliveryDistance <= 2 && stuckRounds <= 1)
+            {
+                return Math.Min(matchingItems.Count, totalNeeded);
+            }
+
+            if (deliveryDistance <= 3 && stuckRounds == 0)
+            {
+                return 1;
+            }
+
+            return 0;
+        }
+
+        if (deliveryDistance <= 3)
+        {
+            return matchingItems.Count;
+        }
+
+        if (deliveryDistance <= 6 && stuckRounds <= 1)
+        {
+            return 1;
+        }
+
+        if (matchingItems.Count == 1 && deliveryDistance <= 8 && stuckRounds == 0)
+        {
+            return 1;
+        }
+
+        return 0;
+    }
+
     private static void ConsumeMatchingInventory(IEnumerable<string> inventory, Dictionary<string, int> neededCounts)
     {
         foreach (var carried in inventory)
@@ -1691,6 +2450,130 @@ public partial class GroceryBotClient
 
             neededCounts[carried]--;
         }
+    }
+
+    private static void ConsumeReliableMatchingInventory(
+        Bot bot,
+        GameState state,
+        IEnumerable<string> inventory,
+        Dictionary<string, int> neededCounts,
+        int[]? deliveryTarget)
+    {
+        var matchingItems = inventory
+            .Where(carried => neededCounts.GetValueOrDefault(carried) > 0)
+            .ToList();
+        if (matchingItems.Count == 0)
+        {
+            return;
+        }
+
+        var inventoryItems = inventory.ToList();
+        if (inventoryItems.Any(carried => neededCounts.GetValueOrDefault(carried) <= 0))
+        {
+            return;
+        }
+
+        var deliveryDistance = deliveryTarget != null && deliveryTarget.Length >= 2
+            ? GetPathDistance(bot.Position, deliveryTarget, state)
+            : int.MaxValue;
+        if (deliveryDistance == int.MaxValue)
+        {
+            return;
+        }
+
+        var stuckRounds = StuckRounds.GetValueOrDefault(bot.Id);
+        var reliableCoverage = 0;
+
+        // In Nightmare mode, distant carried stock often looks "covered" in planning
+        // long before it actually converts into score. Only trust cargo that is already
+        // near a lane, and be very conservative with far deliveries.
+        var totalNeeded = neededCounts.Values.Where(count => count > 0).Sum();
+        var neededTypeCount = neededCounts.Count(pair => pair.Value > 0);
+        var strictSingleTypeFinish = totalNeeded <= 1 ||
+                                     (ScoreStagnationRounds >= 12 && neededTypeCount == 1 && totalNeeded <= 2);
+
+        if (strictSingleTypeFinish)
+        {
+            if (deliveryDistance <= 2 && stuckRounds <= 1)
+            {
+                reliableCoverage = Math.Min(matchingItems.Count, totalNeeded);
+            }
+            else if (deliveryDistance <= 3 && stuckRounds == 0)
+            {
+                reliableCoverage = 1;
+            }
+        }
+        else if (deliveryDistance <= 3)
+        {
+            reliableCoverage = matchingItems.Count;
+        }
+        else if (deliveryDistance <= 6 && stuckRounds <= 1)
+        {
+            reliableCoverage = 1;
+        }
+        else if (matchingItems.Count == 1 && deliveryDistance <= 8 && stuckRounds == 0)
+        {
+            reliableCoverage = 1;
+        }
+
+        foreach (var carried in matchingItems)
+        {
+            if (reliableCoverage <= 0)
+            {
+                break;
+            }
+
+            if (neededCounts.GetValueOrDefault(carried) <= 0)
+            {
+                continue;
+            }
+
+            neededCounts[carried]--;
+            reliableCoverage--;
+        }
+    }
+
+    private static Dictionary<string, int> BuildActiveSupplyCaps(Dictionary<string, int> activeDemandSnapshot, int redundancyPerType)
+    {
+        return activeDemandSnapshot
+            .Where(pair => pair.Value > 0)
+            .ToDictionary(
+                pair => pair.Key,
+                pair => pair.Value + Math.Max(0, redundancyPerType),
+                StringComparer.Ordinal);
+    }
+
+    private static int CommitSupplyAgainstCaps(
+        IEnumerable<string> itemTypes,
+        Dictionary<string, int> capsByType,
+        Dictionary<string, int> committedByType,
+        int maxCommit = int.MaxValue)
+    {
+        var committed = 0;
+        foreach (var itemType in itemTypes)
+        {
+            if (committed >= maxCommit)
+            {
+                break;
+            }
+
+            var cap = capsByType.GetValueOrDefault(itemType);
+            if (cap <= 0)
+            {
+                continue;
+            }
+
+            var current = committedByType.GetValueOrDefault(itemType);
+            if (current >= cap)
+            {
+                continue;
+            }
+
+            committedByType[itemType] = current + 1;
+            committed++;
+        }
+
+        return committed;
     }
 
     private static PickupCandidate? FindBestPickupCandidate(
@@ -1705,6 +2588,7 @@ public partial class GroceryBotClient
         HashSet<(int X, int Y)>? excludedTargets = null)
     {
         PickupCandidate? best = null;
+        var strategicProfile = BuildStrategicDemandProfile(state);
 
         foreach (var item in items)
         {
@@ -1745,7 +2629,11 @@ public partial class GroceryBotClient
                                      string.Equals(item.Type, preferredItemType, StringComparison.Ordinal)
                 ? 6
                 : 0;
-            var score = (pickupDistance * 3) + deliveryDistance - loadBonus - carryBonus - preferredTypeBonus;
+            var strategicWeight = strategicProfile.WeightedDemand.GetValueOrDefault(item.Type);
+            var strategicBonus = activeOrderPickup
+                ? (int)Math.Round(strategicWeight * 3.0, MidpointRounding.AwayFromZero)
+                : 0;
+            var score = (pickupDistance * 3) + deliveryDistance - loadBonus - carryBonus - preferredTypeBonus - strategicBonus;
 
             if (best != null && score >= best.Score)
             {

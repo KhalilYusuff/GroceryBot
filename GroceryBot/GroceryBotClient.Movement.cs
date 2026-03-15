@@ -30,6 +30,30 @@ public partial class GroceryBotClient
         int[] deliveryTarget,
         string role)
     {
+        var stuckRounds = StuckRounds.GetValueOrDefault(bot.Id);
+        var deliveryProgress = TrackDeliveryProgress(bot, deliveryTarget, state);
+        if (deliveryProgress.StagnantRounds >= 5 || deliveryProgress.RepeatWindow >= 4)
+        {
+            CourierRoutes.Remove(bot.Id);
+        }
+
+        if (deliveryProgress.StagnantRounds >= 8 || deliveryProgress.RepeatWindow >= 6)
+        {
+            CourierTargets.Remove(bot.Id);
+            var recoveryResponse = MoveToward(
+                bot,
+                state,
+                deliveryTarget,
+                planningContext.OccupiedPositions,
+                [],
+                true);
+            if (recoveryResponse.Actions[0].Action != "wait")
+            {
+                LogMoveDiagnostics(bot, state, deliveryTarget, recoveryResponse.Actions[0].Action, $"{role}:deliver_recover");
+                return recoveryResponse;
+            }
+        }
+
         var route = GetCourierRoute(bot, deliveryTarget, state);
         var preferredNode = GetNextCourierNode(bot, route);
         if (preferredNode != null)
@@ -47,10 +71,94 @@ public partial class GroceryBotClient
         var response = ExecuteMoveTask(bot, state, planningContext, deliveryTarget, true, role);
         if (response.Actions[0].Action == "wait")
         {
+            var recoveryAction = FindRecoveryAction(bot, state, planningContext.OccupiedPositions, deliveryTarget);
+            if (recoveryAction != "wait")
+            {
+                CourierRoutes.Remove(bot.Id);
+                CourierTargets.Remove(bot.Id);
+                LogMoveDiagnostics(bot, state, deliveryTarget, recoveryAction, $"{role}:recover");
+                return CreateResponse(bot.Id, recoveryAction);
+            }
+
             CourierRoutes.Remove(bot.Id);
+            if (stuckRounds >= 2)
+            {
+                CourierTargets.Remove(bot.Id);
+            }
         }
 
         return response;
+    }
+
+    private static DeliveryProgress TrackDeliveryProgress(Bot bot, int[] deliveryTarget, GameState state)
+    {
+        if (deliveryTarget.Length < 2)
+        {
+            DeliveryProgressByBotId.Remove(bot.Id);
+            return new DeliveryProgress
+            {
+                TargetX = 0,
+                TargetY = 0,
+                BestDistance = int.MaxValue,
+                StagnantRounds = 0,
+                LastX = 0,
+                LastY = 0,
+                RepeatWindow = 0
+            };
+        }
+
+        var distance = GetPathDistance(bot.Position, deliveryTarget, state);
+        if (!DeliveryProgressByBotId.TryGetValue(bot.Id, out var progress) ||
+            progress.TargetX != deliveryTarget[0] ||
+            progress.TargetY != deliveryTarget[1])
+        {
+            progress = new DeliveryProgress
+            {
+                TargetX = deliveryTarget[0],
+                TargetY = deliveryTarget[1],
+                BestDistance = distance,
+                StagnantRounds = 0,
+                LastX = bot.Position[0],
+                LastY = bot.Position[1],
+                RepeatWindow = 0
+            };
+            DeliveryProgressByBotId[bot.Id] = progress;
+            return progress;
+        }
+
+        var repeatWindow = bot.Position[0] == progress.LastX && Math.Abs(bot.Position[1] - progress.LastY) <= 2
+            ? progress.RepeatWindow + 1
+            : 0;
+
+        if (distance < progress.BestDistance)
+        {
+            progress = new DeliveryProgress
+            {
+                TargetX = deliveryTarget[0],
+                TargetY = deliveryTarget[1],
+                BestDistance = distance,
+                StagnantRounds = 0,
+                LastX = bot.Position[0],
+                LastY = bot.Position[1],
+                RepeatWindow = repeatWindow
+            };
+        }
+        else
+        {
+            progress = new DeliveryProgress
+            {
+                TargetX = deliveryTarget[0],
+                TargetY = deliveryTarget[1],
+                BestDistance = progress.BestDistance,
+                StagnantRounds = progress.StagnantRounds + 1,
+                LastX = bot.Position[0],
+                LastY = bot.Position[1],
+                RepeatWindow = repeatWindow
+            };
+        }
+
+        DeliveryProgressByBotId[bot.Id] = progress;
+        return progress;
     }
 
     private static BotResponse ExecuteMoveTask(
@@ -184,22 +292,121 @@ public partial class GroceryBotClient
 
         var stuckRounds = StuckRounds.GetValueOrDefault(bot.Id);
         CourierTargets.TryGetValue(bot.Id, out var existingTarget);
+        var deliveryPressure = GetDeliveryPressure(deliveryTargets, state, assignedTasks);
+        var activeDemand = GetActiveOutstandingCounts(state);
+        var reliableActiveLoad = CountReliableMatchingInventory(bot, state, activeDemand, deliveryTargets);
+        var activeOutstanding = activeDemand.Values.Where(count => count > 0).Sum();
+        var activeTypeCount = activeDemand.Count(pair => pair.Value > 0);
+        var activeCourierTargetCounts = GetActiveCourierTargetCounts(deliveryTargets, state, activeDemand);
+        var stickyActiveCourier =
+            reliableActiveLoad > 0 &&
+            (activeOutstanding <= 2 || activeTypeCount <= 1);
+        var avoidActiveLaneCourier =
+            reliableActiveLoad <= 0 &&
+            activeOutstanding > 0;
+        LastDeliveryPressureSummary = string.Join(
+            " ",
+            deliveryTargets
+                .Where(target => target.Length >= 2)
+                .OrderBy(target => target[0])
+                .ThenBy(target => target[1])
+                .Select(target =>
+                {
+                    var pressure = deliveryPressure.GetValueOrDefault((target[0], target[1]));
+                    return $"{FormatPoint(target)}=a{pressure.Assigned}/o{pressure.Occupied}/t{pressure.Targeted}";
+                }));
         if (existingTarget != null &&
             existingTarget.Length >= 2 &&
-            stuckRounds < 3 &&
             deliveryTargets.Any(target => target.Length >= 2 && target[0] == existingTarget[0] && target[1] == existingTarget[1]))
         {
-            return existingTarget;
-        }
+            var existingPressure = deliveryPressure.GetValueOrDefault((existingTarget[0], existingTarget[1]));
+            var existingPathDistance = GetPathDistance(bot.Position, existingTarget, state);
+            var existingActiveCourierTargeted = activeCourierTargetCounts.GetValueOrDefault((existingTarget[0], existingTarget[1]));
+            var bestAlternative = deliveryTargets
+                .Where(target => target.Length >= 2)
+                .Select(target => new
+                {
+                    Target = target,
+                    Pressure = deliveryPressure.GetValueOrDefault((target[0], target[1])),
+                    ActiveCourierTargeted = activeCourierTargetCounts.GetValueOrDefault((target[0], target[1])),
+                    PathDistance = GetPathDistance(bot.Position, target, state),
+                    HeuristicDistance = GetHeuristicDistance(bot.Position, target)
+                })
+                .OrderBy(candidate => avoidActiveLaneCourier ? candidate.ActiveCourierTargeted : 0)
+                .ThenBy(candidate => candidate.Pressure.Occupied)
+                .ThenBy(candidate => candidate.Pressure.Targeted)
+                .ThenBy(candidate => candidate.Pressure.Assigned)
+                .ThenBy(candidate => candidate.PathDistance)
+                .ThenBy(candidate => candidate.HeuristicDistance)
+                .FirstOrDefault();
 
-        var assignedCounts = assignedTasks
-            .Where(task => task.Kind == "deliver" && task.Target != null && task.Target.Length >= 2)
-            .GroupBy(task => (task.Target![0], task.Target[1]))
-            .ToDictionary(group => group.Key, group => group.Count());
+            if (bestAlternative != null)
+            {
+                if (stickyActiveCourier &&
+                    bestAlternative.Target.Length >= 2 &&
+                    (bestAlternative.Target[0] != existingTarget[0] || bestAlternative.Target[1] != existingTarget[1]))
+                {
+                    var nearCommittedZone = existingPathDistance <= 6;
+                    var alternativeMuchBetter =
+                        existingPressure.Occupied - bestAlternative.Pressure.Occupied >= 3 ||
+                        existingPressure.Targeted - bestAlternative.Pressure.Targeted >= 4 ||
+                        existingPressure.Assigned - bestAlternative.Pressure.Assigned >= 4 ||
+                        existingPathDistance >= bestAlternative.PathDistance + 8;
+                    var severeGridlock =
+                        stuckRounds >= 6 &&
+                        existingPressure.Occupied >= bestAlternative.Pressure.Occupied + 2;
+                    if ((!alternativeMuchBetter && stuckRounds < 6) ||
+                        (nearCommittedZone && !severeGridlock))
+                    {
+                        return existingTarget;
+                    }
+                }
+
+                if (avoidActiveLaneCourier &&
+                    bestAlternative.Target.Length >= 2 &&
+                    (bestAlternative.Target[0] != existingTarget[0] || bestAlternative.Target[1] != existingTarget[1]))
+                {
+                    var existingHotterThanAlternative =
+                        existingActiveCourierTargeted > bestAlternative.ActiveCourierTargeted ||
+                        existingPressure.Targeted >= bestAlternative.Pressure.Targeted + 3 ||
+                        existingPressure.Assigned >= bestAlternative.Pressure.Assigned + 3;
+                    if (existingHotterThanAlternative)
+                    {
+                        CourierRoutes.Remove(bot.Id);
+                    }
+                    else if (stuckRounds < 2)
+                    {
+                        return existingTarget;
+                    }
+                }
+
+                var pressureGap = existingPressure.Occupied - bestAlternative.Pressure.Occupied;
+                var targetGap = existingPressure.Targeted - bestAlternative.Pressure.Targeted;
+                var shouldSwitch =
+                    stuckRounds >= (stickyActiveCourier ? 3 : avoidActiveLaneCourier ? 0 : 1) &&
+                    bestAlternative.Target.Length >= 2 &&
+                    (bestAlternative.Target[0] != existingTarget[0] || bestAlternative.Target[1] != existingTarget[1]) &&
+                    (bestAlternative.ActiveCourierTargeted + 1 < existingActiveCourierTargeted ||
+                     pressureGap >= 2 ||
+                     (pressureGap >= 1 && targetGap >= 1) ||
+                     existingPressure.Targeted - bestAlternative.Pressure.Targeted >= 2);
+                if (!shouldSwitch && stuckRounds < (stickyActiveCourier ? 6 : 3))
+                {
+                    return existingTarget;
+                }
+            }
+            else if (stuckRounds < (stickyActiveCourier ? 6 : 3))
+            {
+                return existingTarget;
+            }
+        }
 
         var selected = deliveryTargets
             .Where(target => target.Length >= 2)
-            .OrderBy(target => assignedCounts.GetValueOrDefault((target[0], target[1])))
+            .OrderBy(target => avoidActiveLaneCourier ? activeCourierTargetCounts.GetValueOrDefault((target[0], target[1])) : 0)
+            .ThenBy(target => deliveryPressure.GetValueOrDefault((target[0], target[1])).Occupied)
+            .ThenBy(target => deliveryPressure.GetValueOrDefault((target[0], target[1])).Targeted)
+            .ThenBy(target => deliveryPressure.GetValueOrDefault((target[0], target[1])).Assigned)
             .ThenBy(target => stuckRounds >= 3
                 ? GetPathDistance(bot.Position, target, state)
                 : 0)
@@ -209,8 +416,7 @@ public partial class GroceryBotClient
 
         if (selected.Length >= 2)
         {
-            if (stuckRounds >= 3 &&
-                existingTarget?.Length >= 2 &&
+            if (existingTarget?.Length >= 2 &&
                 (existingTarget[0] != selected[0] || existingTarget[1] != selected[1]))
             {
                 CourierRoutes.Remove(bot.Id);
@@ -220,6 +426,79 @@ public partial class GroceryBotClient
         }
 
         return selected;
+    }
+
+    private static Dictionary<string, int> GetActiveOutstandingCounts(GameState state)
+    {
+        var activeOrder = state.Orders.FirstOrDefault(order => string.Equals(order.Status, "active", StringComparison.Ordinal));
+        return activeOrder == null
+            ? new Dictionary<string, int>(StringComparer.Ordinal)
+            : GetOutstandingCounts(activeOrder);
+    }
+
+    private static Dictionary<(int X, int Y), int> GetActiveCourierTargetCounts(
+        List<int[]> deliveryTargets,
+        GameState state,
+        Dictionary<string, int> activeDemand)
+    {
+        var validTargets = deliveryTargets
+            .Where(target => target.Length >= 2)
+            .Select(target => (X: target[0], Y: target[1]))
+            .Distinct()
+            .ToList();
+        var botById = state.Bots.ToDictionary(bot => bot.Id);
+        return CourierTargets
+            .Where(pair => pair.Value.Length >= 2)
+            .Where(pair => botById.TryGetValue(pair.Key, out var trackedBot) &&
+                           CountReliableMatchingInventory(trackedBot, state, activeDemand, deliveryTargets) > 0)
+            .Select(pair => (X: pair.Value[0], Y: pair.Value[1]))
+            .Where(target => validTargets.Contains(target))
+            .GroupBy(target => target)
+            .ToDictionary(group => group.Key, group => group.Count());
+    }
+
+    private static Dictionary<(int X, int Y), (int Assigned, int Occupied, int Targeted)> GetDeliveryPressure(
+        List<int[]> deliveryTargets,
+        GameState state,
+        List<BotTask> assignedTasks)
+    {
+        var validTargets = deliveryTargets
+            .Where(target => target.Length >= 2)
+            .Select(target => (X: target[0], Y: target[1]))
+            .Distinct()
+            .ToList();
+        var assignedCounts = assignedTasks
+            .Where(task => task.Kind == "deliver" && task.Target != null && task.Target.Length >= 2)
+            .GroupBy(task => (task.Target![0], task.Target[1]))
+            .ToDictionary(group => group.Key, group => group.Count());
+        var targetedCounts = CourierTargets.Values
+            .Where(target => target.Length >= 2)
+            .GroupBy(target => (target[0], target[1]))
+            .ToDictionary(group => group.Key, group => group.Count());
+        var occupiedCounts = validTargets.ToDictionary(target => target, _ => 0);
+
+        foreach (var other in state.Bots.Where(candidate => candidate.Position.Length >= 2))
+        {
+            foreach (var target in validTargets)
+            {
+                var distance = Math.Abs(other.Position[0] - target.X) + Math.Abs(other.Position[1] - target.Y);
+                if (distance <= 1)
+                {
+                    occupiedCounts[target] += 2;
+                }
+                else if (distance == 2)
+                {
+                    occupiedCounts[target] += 1;
+                }
+            }
+        }
+
+        return validTargets.ToDictionary(
+            target => target,
+            target => (
+                Assigned: assignedCounts.GetValueOrDefault(target),
+                Occupied: occupiedCounts.GetValueOrDefault(target),
+                Targeted: targetedCounts.GetValueOrDefault(target)));
     }
 
     private static int[] GetBestCourierQueueTarget(
@@ -301,8 +580,16 @@ public partial class GroceryBotClient
             return deliveryTargets.FirstOrDefault() ?? [];
         }
 
+        var activeOrder = state.Orders.FirstOrDefault(order => string.Equals(order.Status, "active", StringComparison.Ordinal));
+        var activeDemand = activeOrder == null ? new Dictionary<string, int>() : GetOutstandingCounts(activeOrder);
+        var activeOutstanding = activeDemand.Values.Where(count => count > 0).Sum();
+        var futureAnchor = activeOutstanding <= 1
+            ? GetStrategicStageAnchor(state, activeDemand, deliveryTargets)
+            : null;
+
         return candidates
-            .OrderByDescending(candidate => GetPerimeterScore(candidate, state))
+            .OrderBy(candidate => futureAnchor == null ? int.MaxValue : GetHeuristicDistance(candidate, futureAnchor))
+            .ThenByDescending(candidate => GetPerimeterScore(candidate, state))
             .ThenByDescending(candidate => deliveryTargets.Count == 0
                 ? 0
                 : deliveryTargets.Min(target => GetHeuristicDistance(candidate, target)))
@@ -310,6 +597,33 @@ public partial class GroceryBotClient
             .ThenBy(candidate => candidate[1])
             .ThenBy(candidate => candidate[0])
             .First();
+    }
+
+    private static int[]? GetStrategicStageAnchor(
+        GameState state,
+        Dictionary<string, int> activeDemand,
+        List<int[]> deliveryTargets)
+    {
+        var futureDemand = BuildFutureDemandCounts(state, activeDemand);
+        if (futureDemand.Count == 0)
+        {
+            return null;
+        }
+
+        return state.Items
+            .Where(item => futureDemand.GetValueOrDefault(item.Type) > 0)
+            .Where(item => item.Position.Length >= 2)
+            .OrderByDescending(item => futureDemand.GetValueOrDefault(item.Type))
+            .ThenBy(item => deliveryTargets.Count == 0
+                ? int.MaxValue
+                : deliveryTargets.Min(target => GetHeuristicDistance(item.Position, target)))
+            .ThenBy(item => item.Position[1])
+            .ThenBy(item => item.Position[0])
+            .SelectMany(item => GetAdjacentTargets(item.Position)
+                .Where(candidate => candidate.Length >= 2)
+                .Where(candidate => !IsStaticBlocked(candidate[0], candidate[1], state))
+                .Select(candidate => new[] { candidate[0], candidate[1] }))
+            .FirstOrDefault(target => target.Length >= 2);
     }
 
     private static int GetPerimeterScore(int[] candidate, GameState state)
@@ -409,24 +723,25 @@ public partial class GroceryBotClient
             .ToHashSet();
 
         var perimeterCells = new List<int[]>();
-        for (var x = 1; x < state.Grid.Width - 1; x++)
-        {
-            perimeterCells.Add([x, 1]);
-            perimeterCells.Add([x, state.Grid.Height - 2]);
-        }
-
         for (var y = 2; y < state.Grid.Height - 2; y++)
         {
             perimeterCells.Add([1, y]);
             perimeterCells.Add([state.Grid.Width - 2, y]);
         }
 
+        for (var x = 2; x < state.Grid.Width - 2; x++)
+        {
+            perimeterCells.Add([x, state.Grid.Height - 2]);
+        }
+
         var selected = perimeterCells
             .Where(cell => !reservedTargets.Contains((cell[0], cell[1])))
             .Where(cell => !IsStaticBlocked(cell[0], cell[1], state))
             .Where(cell => !deliveryTargets.Any(zone => zone.Length >= 2 && GetHeuristicDistance(cell, zone) <= 2))
+            .Where(cell => cell[1] > 1)
             .DistinctBy(cell => (cell[0], cell[1]))
-            .OrderByDescending(cell => deliveryTargets.Count == 0
+            .OrderByDescending(cell => cell[0] == 1 || cell[0] == state.Grid.Width - 2 ? 1 : 0)
+            .ThenByDescending(cell => deliveryTargets.Count == 0
                 ? 0
                 : deliveryTargets.Min(zone => GetHeuristicDistance(cell, zone)))
             .ThenBy(cell => ((cell[0] * 31) + (cell[1] * 17) + (bot.Id * 13)) % 23)
@@ -450,13 +765,39 @@ public partial class GroceryBotClient
         HashSet<(int X, int Y)> reservedTargets,
         string? preferredItemType = null)
     {
-        return state.Items
+        var primary = state.Items
             .Where(item => activeDemand.GetValueOrDefault(item.Type) > 0)
             .Select(item => new
             {
                 Preferred = !string.IsNullOrEmpty(preferredItemType) &&
                             string.Equals(item.Type, preferredItemType, StringComparison.Ordinal),
                 Target = FindAdjacentWalkableTarget(item.Position, state, [], reservedTargets, bot.Position),
+                DeliveryDistance = deliveryTargets.Count == 0
+                    ? 0
+                    : deliveryTargets.Min(zone => zone.Length >= 2
+                        ? GetPathDistance(item.Position, zone, state)
+                        : int.MaxValue)
+            })
+            .Where(candidate => candidate.Target != null)
+            .OrderByDescending(candidate => candidate.Preferred)
+            .ThenBy(candidate => GetPathDistance(bot.Position, candidate.Target!, state))
+            .ThenBy(candidate => candidate.DeliveryDistance)
+            .Select(candidate => candidate.Target)
+            .FirstOrDefault();
+        if (primary != null)
+        {
+            return primary;
+        }
+
+        // If all promising access cells were already reserved this round, fall back to a
+        // non-reserved-blind search rather than idling in stage while active demand is open.
+        return state.Items
+            .Where(item => activeDemand.GetValueOrDefault(item.Type) > 0)
+            .Select(item => new
+            {
+                Preferred = !string.IsNullOrEmpty(preferredItemType) &&
+                            string.Equals(item.Type, preferredItemType, StringComparison.Ordinal),
+                Target = FindAdjacentWalkableTarget(item.Position, state, [], [], bot.Position),
                 DeliveryDistance = deliveryTargets.Count == 0
                     ? 0
                     : deliveryTargets.Min(zone => zone.Length >= 2
@@ -900,6 +1241,15 @@ public partial class GroceryBotClient
     {
         if (CourierRoutes.TryGetValue(bot.Id, out var existingRoute))
         {
+            var routeTargetChanged = deliveryTarget.Length >= 2 &&
+                                     existingRoute.Count > 0 &&
+                                     existingRoute.Last() != (deliveryTarget[0], deliveryTarget[1]);
+            if (routeTargetChanged)
+            {
+                CourierRoutes.Remove(bot.Id);
+            }
+            else
+            {
             var nextNode = existingRoute.Count > 0 ? existingRoute.Peek() : ((int X, int Y)?)null;
             if (nextNode != null &&
                 (bot.Position[0] == nextNode.Value.X && bot.Position[1] == nextNode.Value.Y))
@@ -910,6 +1260,7 @@ public partial class GroceryBotClient
             if (existingRoute.Count > 0)
             {
                 return existingRoute;
+            }
             }
         }
 
